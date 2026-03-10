@@ -382,3 +382,61 @@ When the tests are run on the CI, the following variables are re-defined:
 
   For a code push, this is set to the name of the active branch at GitHub.  For
   a PR, this is the name of the branch which is receiving the PR.
+
+
+Gaea Regression Testing
+=======================
+
+For running the full MOM6 regression test suite on GFDL's Gaea HPC system,
+a separate Makefile is provided.
+
+Usage
+-----
+
+From the ``.testing`` directory on a Gaea login node::
+
+   make -f Makefile.gaea test-Gaea
+
+This runs the complete pipeline: setup, compile, run (via Slurm), and verify.
+
+Individual stages can be run separately::
+
+   make -f Makefile.gaea setup      # Clone stats repo and create workspaces
+   make -f Makefile.gaea compile    # Build all executables
+   make -f Makefile.gaea run        # Submit Slurm jobs (waits for completion)
+   make -f Makefile.gaea verify     # Check results against baselines
+
+For help and configuration options::
+
+   make -f Makefile.gaea help
+
+Configuration
+-------------
+
+System-specific settings are in ``systems/gaea.mk``. User overrides can be
+placed in ``config.mk`` or passed on the command line::
+
+   make -f Makefile.gaea test-Gaea SLURM_QOS=normal SLURM_TIME=30:00
+
+Key variables:
+
+``JOB_DIR``
+   Scratch directory for test output (auto-generated with timestamp)
+
+``CI_COMMIT_SHA``
+   Git commit to test (default: current HEAD)
+
+``STATS_REPO_BRANCH``
+   Branch for regression baselines (default: dev/gfdl)
+
+``SLURM_ACCOUNT``
+   Slurm account for batch jobs (default: gfdl_o)
+
+``SLURM_QOS``
+   Slurm QOS (default: debug)
+
+Adding New Systems
+------------------
+
+See ``systems/README.md`` for instructions on adding regression testing
+support for other HPC systems.

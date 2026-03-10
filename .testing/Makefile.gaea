@@ -1,0 +1,256 @@
+# Gaea Regression Testing Makefile
+#
+# This Makefile provides a single-command interface for running the MOM6
+# regression test suite on GFDL's Gaea HPC system.
+#
+# Usage:
+#   make -f Makefile.gaea test-Gaea     # Run full test suite
+#   make -f Makefile.gaea help          # Show available targets
+#
+# Or via the main Makefile:
+#   make test-Gaea
+
+SHELL = bash
+
+#---
+# Compute paths BEFORE including other files (MAKEFILE_LIST changes with includes)
+# Get the directory containing this Makefile (.testing/), then go up one level
+THIS_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+TESTING_DIR := $(dir $(THIS_MAKEFILE))
+#CI_PROJECT_DIR := $(abspath $(TESTING_DIR)/..)
+CI_PROJECT_DIR := ../
+CONFIGS_REPO_BRANCH := 695294882794f389eb7bf7cc965ec9896e78fbc6
+
+#---
+# Include system configuration
+include systems/gaea.mk
+-include config.mk
+
+#---
+# Derived paths and environment
+
+# Job directory - unique per run to avoid conflicts
+#JOB_DIR ?= /gpfs/f5/gfdl_o/scratch/$(USER)/mom6-ci/$(shell date +%Y%m%d-%H%M%S)
+JOB_DIR ?= /gpfs/f5/cefi/scratch/Utheri.Wagura/tmp_mybuild/
+
+# Commit to test (defaults to current HEAD)
+CI_COMMIT_SHA ?= $(shell git -C $(CI_PROJECT_DIR) rev-parse HEAD)
+
+# Path to pipeline tool script
+PIPELINE_TOOL := $(CI_PROJECT_DIR)/.gitlab/pipeline-ci-tool.sh
+
+# Export for pipeline-ci-tool.sh
+export JOB_DIR
+export CI_PROJECT_DIR
+export CI_COMMIT_SHA
+export STATS_REPO_URL
+export STATS_REPO_BRANCH
+export CONFIGS_REPO_BRANCH
+
+#---
+# Hostname check for Gaea
+HOSTNAME := $(shell hostname)
+IS_GAEA := $(if $(findstring gaea,$(HOSTNAME)),yes,$(if $(findstring c5,$(HOSTNAME)),yes,))
+
+#---
+# Main targets
+
+.PHONY: test-Gaea setup compile run verify clean help
+.PHONY: setup-workspaces compile-all run-all verify-all
+.PHONY: run-gnu run-intel run-pgi run-gnu-restarts
+.PHONY: verify-gnu verify-intel verify-pgi check-gaea
+
+# Full test suite
+test-Gaea: check-gaea setup compile run verify
+	@echo ""
+	@echo "=========================================="
+	@echo "  All Gaea tests completed successfully"
+	@echo "=========================================="
+	@echo "Job directory: $(JOB_DIR)"
+
+# Verify we're on Gaea
+check-gaea:
+ifndef IS_GAEA
+	$(error This target must be run on Gaea. Current host: $(HOSTNAME))
+endif
+	@echo "Running on Gaea ($(HOSTNAME))"
+	@echo "Commit: $(CI_COMMIT_SHA)"
+	@echo "Job directory: $(JOB_DIR)"
+
+#---
+# Setup stage
+
+setup: check-gaea
+	@echo ""
+	@echo "=== Setting up test environment ==="
+	@echo "Stats repo: $(STATS_REPO_URL) ($(STATS_REPO_BRANCH))"
+	$(PIPELINE_TOOL) create-job-dir
+	$(MAKE) -f Makefile.gaea setup-workspaces
+
+setup-workspaces:
+	$(PIPELINE_TOOL) copy-test-space gnu
+	#$(PIPELINE_TOOL) copy-test-space intel
+	#$(PIPELINE_TOOL) copy-test-space pgi
+	#$(PIPELINE_TOOL) copy-test-space gnu-rst
+
+#---
+# Compile stage
+
+compile: check-gaea
+	@echo ""
+	@echo "=== Compiling executables ==="
+	$(MAKE) -f Makefile.gaea compile-all
+
+compile-all:
+	@echo "Compiling GNU (repro, static, debug)..."
+	$(PIPELINE_TOOL) mrs-compile repro_gnu #mrs-compile static_gnu mrs-compile debug_gnu
+	#@echo "Compiling Intel (repro)..."
+	#$(PIPELINE_TOOL) mrs-compile repro_intel
+	#@echo "Compiling PGI (repro)..."
+	#$(PIPELINE_TOOL) mrs-compile repro_pgi
+	#@echo "Compiling no-libs tests..."
+	#$(PIPELINE_TOOL) nolibs-ocean-only-compile gnu
+	#$(PIPELINE_TOOL) nolibs-ocean-ice-compile gnu
+
+#---
+# Run stage (batch jobs)
+
+run: check-gaea
+	@echo ""
+	@echo "=== Running tests via Slurm ==="
+	#$(MAKE) -f Makefile.gaea run-all
+	$(MAKE) -f Makefile.gaea run-gnu
+
+run-all: run-gnu run-intel run-pgi run-gnu-restarts
+
+run-gnu:
+	@echo "Submitting GNU test suite ($(TEST_CODES_gnu))..."
+	sbatch --clusters=$(SLURM_CLUSTER) --nodes=$(SLURM_NODES) \
+	  --time=$(SLURM_TIME) --account=$(SLURM_ACCOUNT) --qos=$(SLURM_QOS) \
+	  --job-name=mom6_gnu_tests --output=$(JOB_DIR)/log.gnu --wait \
+	  $(PIPELINE_TOOL) run-suite gnu $(TEST_CODES_gnu)
+	@test -f $(JOB_DIR)/CI-BATCH-SUCCESS-gnu-$(TEST_CODES_gnu) || \
+	  (echo "ERROR: GNU batch job did not complete successfully"; \
+	   echo "Check log: $(JOB_DIR)/log.gnu"; exit 1)
+	@echo "GNU tests completed"
+
+run-intel:
+	@echo "Submitting Intel test suite ($(TEST_CODES_intel))..."
+	sbatch --clusters=$(SLURM_CLUSTER) --nodes=$(SLURM_NODES) \
+	  --time=$(SLURM_TIME) --account=$(SLURM_ACCOUNT) --qos=$(SLURM_QOS) \
+	  --job-name=mom6_intel_tests --output=$(JOB_DIR)/log.intel --wait \
+	  $(PIPELINE_TOOL) run-suite intel $(TEST_CODES_intel)
+	@test -f $(JOB_DIR)/CI-BATCH-SUCCESS-intel-$(TEST_CODES_intel) || \
+	  (echo "ERROR: Intel batch job did not complete successfully"; \
+	   echo "Check log: $(JOB_DIR)/log.intel"; exit 1)
+	@echo "Intel tests completed"
+
+run-pgi:
+	@echo "Submitting PGI test suite ($(TEST_CODES_pgi))..."
+	sbatch --clusters=$(SLURM_CLUSTER) --nodes=$(SLURM_NODES) \
+	  --time=$(SLURM_TIME) --account=$(SLURM_ACCOUNT) --qos=$(SLURM_QOS) \
+	  --job-name=mom6_pgi_tests --output=$(JOB_DIR)/log.pgi --wait \
+	  $(PIPELINE_TOOL) run-suite pgi $(TEST_CODES_pgi)
+	@test -f $(JOB_DIR)/CI-BATCH-SUCCESS-pgi-$(TEST_CODES_pgi) || \
+	  (echo "ERROR: PGI batch job did not complete successfully"; \
+	   echo "Check log: $(JOB_DIR)/log.pgi"; exit 1)
+	@echo "PGI tests completed"
+
+run-gnu-restarts:
+	@echo "Submitting GNU restart tests ($(TEST_CODES_gnu_restart))..."
+	sbatch --clusters=$(SLURM_CLUSTER) --nodes=$(SLURM_NODES) \
+	  --time=$(SLURM_TIME) --account=$(SLURM_ACCOUNT) --qos=$(SLURM_QOS) \
+	  --job-name=mom6_gnu_restarts --output=$(JOB_DIR)/log.gnu-rst --wait \
+	  $(PIPELINE_TOOL) run-suite gnu $(TEST_CODES_gnu_restart)
+	@test -f $(JOB_DIR)/CI-BATCH-SUCCESS-gnu-$(TEST_CODES_gnu_restart) || \
+	  (echo "ERROR: GNU restart batch job did not complete successfully"; \
+	   echo "Check log: $(JOB_DIR)/log.gnu-rst"; exit 1)
+	@echo "GNU restart tests completed"
+
+#---
+# Verify stage
+
+verify: check-gaea
+	@echo ""
+	@echo "=== Verifying results ==="
+	#$(MAKE) -f Makefile.gaea verify-all
+	$(MAKE) -f Makefile.gaea verify-gnu
+
+verify-all: verify-gnu verify-intel verify-pgi
+
+verify-gnu:
+	@echo "Verifying GNU results..."
+	$(PIPELINE_TOOL) check-stats gnu S
+	$(PIPELINE_TOOL) check-stats gnu N
+	$(PIPELINE_TOOL) check-stats gnu L
+	#$(PIPELINE_TOOL) check-stats gnu D
+	#$(PIPELINE_TOOL) check-stats gnu T
+	#$(PIPELINE_TOOL) check-stats gnu R
+	-$(PIPELINE_TOOL) check-params gnu
+	#-$(PIPELINE_TOOL) check-diags gnu
+
+verify-intel:
+	@echo "Verifying Intel results..."
+	$(PIPELINE_TOOL) check-stats intel S
+	$(PIPELINE_TOOL) check-stats intel N
+	$(PIPELINE_TOOL) check-stats intel L
+	-$(PIPELINE_TOOL) check-params intel
+
+verify-pgi:
+	@echo "Verifying PGI results..."
+	$(PIPELINE_TOOL) check-stats pgi S
+	$(PIPELINE_TOOL) check-stats pgi N
+	$(PIPELINE_TOOL) check-stats pgi L
+	-$(PIPELINE_TOOL) check-params pgi
+
+#---
+# Cleanup
+
+clean:
+	@echo "Cleaning job directory: $(JOB_DIR)"
+	rm -rf $(JOB_DIR)
+	rm -rf $(HOME)/ci/$(notdir $(JOB_DIR))
+
+#---
+# Help
+
+help:
+	@echo "MOM6 Gaea Regression Testing"
+	@echo ""
+	@echo "Usage:"
+	@echo "  make -f Makefile.gaea <target>"
+	@echo ""
+	@echo "Main targets:"
+	@echo "  test-Gaea    Run full test suite (setup + compile + run + verify)"
+	@echo "  setup        Clone stats repo and create workspaces"
+	@echo "  compile      Build all executables (gnu, intel, pgi)"
+	@echo "  run          Submit Slurm jobs and wait for completion"
+	@echo "  verify       Check results against regression baselines"
+	@echo "  clean        Remove job directory"
+	@echo "  help         Show this help message"
+	@echo ""
+	@echo "Individual run targets:"
+	@echo "  run-gnu          Run GNU test suite"
+	@echo "  run-intel        Run Intel test suite"
+	@echo "  run-pgi          Run PGI test suite"
+	@echo "  run-gnu-restarts Run GNU restart tests"
+	@echo ""
+	@echo "Individual verify targets:"
+	@echo "  verify-gnu       Verify GNU results"
+	@echo "  verify-intel     Verify Intel results"
+	@echo "  verify-pgi       Verify PGI results"
+	@echo ""
+	@echo "Configuration (can be set via config.mk or environment):"
+	@echo "  JOB_DIR              Scratch directory for test output"
+	@echo "  CI_COMMIT_SHA        Git commit to test (default: HEAD)"
+	@echo "  STATS_REPO_URL       URL for regression baselines repo"
+	@echo "  STATS_REPO_BRANCH    Branch for baselines (default: dev/gfdl)"
+	@echo "  SLURM_ACCOUNT        Slurm account (default: gfdl_o)"
+	@echo "  SLURM_QOS            Slurm QOS (default: debug)"
+	@echo "  SLURM_TIME           Slurm time limit (default: 15:00)"
+	@echo ""
+	@echo "Current settings:"
+	@echo "  JOB_DIR:      $(JOB_DIR)"
+	@echo "  COMMIT:       $(CI_COMMIT_SHA)"
+	@echo "  STATS_REPO:   $(STATS_REPO_URL)"
+	@echo "  BRANCH:       $(STATS_REPO_BRANCH)"
