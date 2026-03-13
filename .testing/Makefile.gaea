@@ -22,8 +22,12 @@ CI_PROJECT_DIR := $(abspath $(TESTING_DIR)/..)
 
 #---
 # Include system configuration
-include systems/gaea.mk
 -include config.mk
+
+#---
+# Stats repository (contains regression baselines)
+STATS_REPO_URL ?= https://gitlab.gfdl.noaa.gov/Utheri.Wagura/Gaea-stats-MOM6-examples.git
+STATS_REPO_BRANCH ?= refactor/unified-test-api
 
 #---
 # Derived paths and environment
