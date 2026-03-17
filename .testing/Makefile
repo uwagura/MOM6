@@ -33,7 +33,8 @@ STATS_REPO_BRANCH ?= refactor/unified-test-api
 # Derived paths and environment
 
 # Job directory - configurable, defaults to timestamped directory under .testing
-JOB_DIR ?= $(TESTING_DIR)/job-$(shell date +%Y%m%d-%H%M%S)
+JOB_TS := $(shell date +%Y%m%d-%H%M%S)
+JOB_DIR ?= $(TESTING_DIR)/job-${JOB_TS}
 
 # Gaea-stats repository directory
 STATS_REPO_DIR := $(JOB_DIR)/Gaea-stats-MOM6-examples
