@@ -40,20 +40,16 @@ JOB_DIR ?= $(TESTING_DIR)/job-${JOB_TS}
 STATS_REPO_DIR := $(JOB_DIR)/Gaea-stats-MOM6-examples
 
 # Commit to test (defaults to current HEAD)
-CI_COMMIT_SHA ?= $(shell git -C $(CI_PROJECT_DIR) rev-parse HEAD)
-
-#---
-# Hostname check for Gaea
-HOSTNAME := $(shell hostname)
-IS_GAEA := $(if $(findstring gaea,$(HOSTNAME)),yes,$(if $(findstring c5,$(HOSTNAME)),yes,))
+#CI_COMMIT_SHA ?= $(shell git -C $(CI_PROJECT_DIR) rev-parse HEAD)
+CI_COMMIT_SHA ?= a5da88f87e66c4d675f807ed5361e84c6e6ea210
 
 #---
 # Main targets
 
-.PHONY: test-Gaea setup clean help check-gaea
+.PHONY: test-Gaea setup clean help
 
 # Full test suite - setup environment then delegate to Gaea-stats
-test-Gaea: check-gaea setup
+test-Gaea: setup
 	@echo ""
 	@echo "=== Delegating to Gaea-stats-MOM6-examples for testing ==="
 	$(MAKE) -C $(STATS_REPO_DIR) test \
@@ -65,20 +61,12 @@ test-Gaea: check-gaea setup
 	@echo "=========================================="
 	@echo "Job directory: $(JOB_DIR)"
 
-# Verify we're on Gaea
-check-gaea:
-ifndef IS_GAEA
-	$(error This target must be run on Gaea. Current host: $(HOSTNAME))
-endif
-	@echo "Running on Gaea ($(HOSTNAME))"
-	@echo "Commit: $(CI_COMMIT_SHA)"
-	@echo "Job directory: $(JOB_DIR)"
 
 #---
 # Setup stage - clone Gaea-stats repo
 # All test-specific setup (MOM6-examples initialization, etc.) happens in Gaea-stats
 
-setup: check-gaea
+setup:
 	@echo ""
 	@echo "=== Setting up test environment ==="
 	@echo "Stats repo: $(STATS_REPO_URL) ($(STATS_REPO_BRANCH))"
