@@ -1,15 +1,13 @@
-# Gaea Regression Testing Makefile
+# MOM6 Platform Testing Makefile
 #
-# This Makefile provides a minimal interface for running the MOM6
-# regression test suite on GFDL's Gaea HPC system by delegating to the
-# Gaea-stats-MOM6-examples repository.
+# This Makefile provides a platform-agnostic interface for running MOM6
+# regression test suites across multiple platforms by delegating to
+# platform-specific test repositories.
 #
 # Usage:
-#   make -f Makefile.gaea test-Gaea     # Run full test suite
-#   make -f Makefile.gaea help          # Show available targets
-#
-# Or via the main Makefile:
-#   make test-Gaea
+#   make test                     # Test all configured platforms
+#   make test PLATFORMS="gaea"    # Test specific platform(s)
+#   make help                     # Show available targets
 
 SHELL = bash
 
@@ -21,13 +19,8 @@ TESTING_DIR := $(dir $(THIS_MAKEFILE))
 CI_PROJECT_DIR := $(abspath $(TESTING_DIR)/..)
 
 #---
-# Include system configuration
--include config.mk
-
-#---
-# Stats repository (contains regression baselines)
-STATS_REPO_URL ?= https://gitlab.gfdl.noaa.gov/Utheri.Wagura/Gaea-stats-MOM6-examples.git
-STATS_REPO_BRANCH ?= refactor/unified-test-api
+# Include platform configuration
+include $(TESTING_DIR)/platforms.mk
 
 #---
 # Derived paths and environment
@@ -36,9 +29,6 @@ STATS_REPO_BRANCH ?= refactor/unified-test-api
 JOB_TS := $(shell date +%Y%m%d-%H%M%S)
 JOB_DIR ?= $(TESTING_DIR)/job-${JOB_TS}
 
-# Gaea-stats repository directory
-STATS_REPO_DIR := $(JOB_DIR)/Gaea-stats-MOM6-examples
-
 # Commit to test (defaults to current HEAD)
 #CI_COMMIT_SHA ?= $(shell git -C $(CI_PROJECT_DIR) rev-parse HEAD)
 CI_COMMIT_SHA ?= a5da88f87e66c4d675f807ed5361e84c6e6ea210
@@ -46,41 +36,92 @@ CI_COMMIT_SHA ?= a5da88f87e66c4d675f807ed5361e84c6e6ea210
 #---
 # Main targets
 
-.PHONY: test-Gaea setup clean help
+.PHONY: test setup-platform test-platform clean help
 
-# Full test suite - setup environment then delegate to Gaea-stats
-test-Gaea: setup
+# Validate platform configuration
+define VALIDATE_PLATFORM
+$(if $(PLATFORM_$(1)_REPO_URL),,$(error Platform $(1): PLATFORM_$(1)_REPO_URL not defined))
+$(if $(PLATFORM_$(1)_REPO_BRANCH),,$(error Platform $(1): PLATFORM_$(1)_REPO_BRANCH not defined))
+endef
+
+# Main test target - iterate through all platforms
+test:
 	@echo ""
-	@echo "=== Delegating to Gaea-stats-MOM6-examples for testing ==="
-	$(MAKE) -C $(STATS_REPO_DIR) test \
+	@echo "=========================================="
+	@echo "  MOM6 Multi-Platform Test Suite"
+	@echo "=========================================="
+	@echo "Testing platforms: $(PLATFORMS)"
+	@echo "MOM6 commit: $(CI_COMMIT_SHA)"
+	@echo "Job directory: $(JOB_DIR)"
+	@echo ""
+	@FAILED_PLATFORMS=""; \
+	PASSED_PLATFORMS=""; \
+	for platform in $(PLATFORMS); do \
+		echo ""; \
+		echo "=========================================="; \
+		echo "  Testing platform: $$platform"; \
+		echo "=========================================="; \
+		if $(MAKE) test-platform PLATFORM=$$platform; then \
+			PASSED_PLATFORMS="$$PASSED_PLATFORMS $$platform"; \
+			echo "✓ Platform $$platform: PASSED"; \
+		else \
+			FAILED_PLATFORMS="$$FAILED_PLATFORMS $$platform"; \
+			echo "✗ Platform $$platform: FAILED"; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "  Test Summary"; \
+	echo "=========================================="; \
+	if [ -n "$$PASSED_PLATFORMS" ]; then \
+		echo "Passed:$$PASSED_PLATFORMS"; \
+	fi; \
+	if [ -n "$$FAILED_PLATFORMS" ]; then \
+		echo "Failed:$$FAILED_PLATFORMS"; \
+		echo ""; \
+		echo "Some platforms failed. See output above for details."; \
+		exit 1; \
+	else \
+		echo "All platforms passed!"; \
+	fi
+
+# Test a single platform (called by test target)
+# Requires: PLATFORM variable set
+test-platform: setup-platform
+	@if [ -z "$(PLATFORM)" ]; then \
+		echo "ERROR: PLATFORM variable not set"; \
+		exit 1; \
+	fi
+	$(eval $(call VALIDATE_PLATFORM,$(PLATFORM)))
+	@PLATFORM_REPO_DIR="$(JOB_DIR)/$(PLATFORM)-stats"; \
+	echo "Delegating to $$PLATFORM_REPO_DIR/Makefile..."; \
+	$(MAKE) -C $$PLATFORM_REPO_DIR -f Makefile.filebased test \
 		MOM6_SOURCE=$(CI_PROJECT_DIR) \
 		MOM6_COMMIT=$(CI_COMMIT_SHA)
-	@echo ""
-	@echo "=========================================="
-	@echo "  All Gaea tests completed successfully"
-	@echo "=========================================="
-	@echo "Job directory: $(JOB_DIR)"
 
-
-#---
-# Setup stage - clone Gaea-stats repo
-# All test-specific setup (MOM6-examples initialization, etc.) happens in Gaea-stats
-
-setup:
-	@echo ""
-	@echo "=== Setting up test environment ==="
-	@echo "Stats repo: $(STATS_REPO_URL) ($(STATS_REPO_BRANCH))"
-	@echo "Job directory: $(JOB_DIR)"
-	@mkdir -p $(JOB_DIR)
-	@if [ ! -d "$(STATS_REPO_DIR)/.git" ]; then \
-		echo "Cloning $(STATS_REPO_URL)..."; \
-		git clone $(STATS_REPO_URL) $(STATS_REPO_DIR); \
-		cd $(STATS_REPO_DIR) && git checkout $(STATS_REPO_BRANCH); \
-		echo "Gaea-stats repository cloned successfully"; \
-	else \
-		echo "Gaea-stats repo already exists at $(STATS_REPO_DIR)"; \
+# Setup for a single platform - clone stats repo
+# Requires: PLATFORM variable set
+setup-platform:
+	@if [ -z "$(PLATFORM)" ]; then \
+		echo "ERROR: PLATFORM variable not set"; \
+		exit 1; \
 	fi
-	@echo "Setup complete - testing environment ready"
+	$(eval $(call VALIDATE_PLATFORM,$(PLATFORM)))
+	@PLATFORM_REPO_URL="$(PLATFORM_$(PLATFORM)_REPO_URL)"; \
+	PLATFORM_REPO_BRANCH="$(PLATFORM_$(PLATFORM)_REPO_BRANCH)"; \
+	PLATFORM_REPO_DIR="$(JOB_DIR)/$(PLATFORM)-stats"; \
+	echo "Setting up platform: $(PLATFORM)"; \
+	echo "  Repo: $$PLATFORM_REPO_URL ($$PLATFORM_REPO_BRANCH)"; \
+	echo "  Directory: $$PLATFORM_REPO_DIR"; \
+	mkdir -p $(JOB_DIR); \
+	if [ ! -d "$$PLATFORM_REPO_DIR/.git" ]; then \
+		echo "Cloning $$PLATFORM_REPO_URL..."; \
+		git clone $$PLATFORM_REPO_URL $$PLATFORM_REPO_DIR; \
+		cd $$PLATFORM_REPO_DIR && git checkout $$PLATFORM_REPO_BRANCH; \
+		echo "Platform stats repository cloned successfully"; \
+	else \
+		echo "Platform stats repo already exists at $$PLATFORM_REPO_DIR"; \
+	fi
 
 #---
 # Cleanup
@@ -93,31 +134,33 @@ clean:
 # Help
 
 help:
-	@echo "MOM6 Gaea Regression Testing"
+	@echo "MOM6 Platform Testing"
 	@echo ""
-	@echo "This is a minimal interface that delegates testing to Gaea-stats-MOM6-examples."
+	@echo "This interface delegates testing to platform-specific repositories."
+	@echo "Each platform provides a Makefile with a 'test' target that implements"
+	@echo "its test suite."
 	@echo ""
 	@echo "Usage:"
-	@echo "  make -f Makefile.gaea <target>"
+	@echo "  make test                     Test all configured platforms"
+	@echo "  make test PLATFORMS=\"p1 p2\"  Test specific platforms"
+	@echo "  make clean                    Remove job directory"
+	@echo "  make help                     Show this help message"
 	@echo ""
-	@echo "Main targets:"
-	@echo "  test-Gaea    Run full test suite (setup + delegate to Gaea-stats)"
-	@echo "  setup        Clone Gaea-stats repository"
-	@echo "  clean        Remove job directory"
-	@echo "  help         Show this help message"
+	@echo "Configuration:"
+	@echo "  Platforms are defined in platforms.mk"
+	@echo "  Edit platforms.mk to add/remove/configure platforms"
 	@echo ""
-	@echo "Configuration (can be set via config.mk or environment):"
-	@echo "  JOB_DIR              Test workspace directory"
-	@echo "                       (default: .testing/job-<timestamp>)"
-	@echo "  CI_COMMIT_SHA        Git commit to test (default: HEAD)"
-	@echo "  STATS_REPO_URL       URL for Gaea-stats repository"
-	@echo "  STATS_REPO_BRANCH    Branch for Gaea-stats (default: dev/gfdl)"
+	@echo "Current configuration:"
+	@echo "  Configured platforms: $(PLATFORMS)"
+	@echo "  Job directory:        $(JOB_DIR)"
+	@echo "  Commit to test:       $(CI_COMMIT_SHA)"
 	@echo ""
-	@echo "Current settings:"
-	@echo "  JOB_DIR:      $(JOB_DIR)"
-	@echo "  COMMIT:       $(CI_COMMIT_SHA)"
-	@echo "  STATS_REPO:   $(STATS_REPO_URL)"
-	@echo "  BRANCH:       $(STATS_REPO_BRANCH)"
+	@echo "Adding a new platform:"
+	@echo "  1. Edit platforms.mk"
+	@echo "  2. Add platform name to PLATFORMS variable"
+	@echo "  3. Define PLATFORM_<name>_REPO_URL"
+	@echo "  4. Define PLATFORM_<name>_REPO_BRANCH"
 	@echo ""
-	@echo "Note: All compiler selection, Slurm configuration, and test execution"
-	@echo "      is managed by Gaea-stats-MOM6-examples/Makefile"
+	@echo "Platform requirements:"
+	@echo "  Each platform repo must provide a Makefile with a 'test' target"
+	@echo "  that accepts MOM6_SOURCE and MOM6_COMMIT variables"
