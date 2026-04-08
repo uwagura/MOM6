@@ -2330,6 +2330,8 @@ function kappa_shear_init(Time, G, GV, US, param_file, diag, CS)
          's-2', conversion=US%s_to_T**2)
   endif
 
+  !$omp target enter data map(to: CS)
+
 end function kappa_shear_init
 
 !> This function indicates to other modules whether the Jackson et al shear mixing
