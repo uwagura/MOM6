@@ -38,7 +38,7 @@ end interface dz_to_thickness
 !> Converts layer thickness in thickness units into the vertical distance between the
 !! interfaces around a layer in height units.
 interface thickness_to_dz
-  module procedure thickness_to_dz_3d, thickness_to_dz_jslice
+  module procedure thickness_to_dz_3d, thickness_to_dz_jslice, thickness_to_dz_column
 end interface thickness_to_dz
 
 contains
@@ -1005,6 +1005,65 @@ subroutine thickness_to_dz_jslice(h, tv, dz, j, G, GV, halo_size, do_offload)
   endif
 
 end subroutine thickness_to_dz_jslice
+
+
+!> Converts layer thicknesses in thickness units to the vertical distance between edges in height
+!! units for a single column, perhaps by multiplication by the precomputed layer-mean specific
+!! volume stored in an array in the thermo_var_ptrs type when in non-Boussinesq mode.
+subroutine thickness_to_dz_column(h, tv, dz, i, j, G, GV, do_offload)
+  type(ocean_grid_type),   intent(in)    :: G  !< The ocean's grid structure
+  type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
+                           intent(in)    :: h  !< Input thicknesses in thickness units [H ~> m or kg m-2].
+  type(thermo_var_ptrs),   intent(in)    :: tv !< A structure pointing to various
+                                               !! thermodynamic variables
+  real, dimension(SZK_(GV)), &
+                           intent(inout) :: dz !< Geometric layer thicknesses in height units [Z ~> m]
+                                               !! This is essentially intent out, but declared as intent
+                                               !! inout to preserve any initialized values.
+  integer,                 intent(in)    :: i  !< The first (i-) index of the input thicknesses to work with
+  integer,                 intent(in)    :: j  !< The second (j-) index of the input thicknesses to work with
+  logical,       optional, intent(in)    :: do_offload !< If .true., only uses data calculates dz
+                                               !! on GPU (default .false.)
+  ! Local variables
+  character(len=128) :: mesg    ! A string for error messages
+  integer :: k, nz
+  logical :: use_doconcurrent
+
+  ! guard to allow turning off/on do concurrent
+  use_doconcurrent = .false.
+  if (present(do_offload)) use_doconcurrent = do_offload
+
+  nz = GV%ke
+
+  if ((.not.GV%Boussinesq) .and. allocated(tv%SpV_avg))  then
+    if (tv%valid_SpV_halo < 0) then
+      call MOM_error(FATAL, "thickness_to_dz called in fully non-Boussinesq mode with "// &
+                            "invalid values of SpV_avg.")
+    endif
+
+    if (use_doconcurrent) then
+      do concurrent (k=1:nz)
+        dz(k) = GV%H_to_RZ * h(i,j,k) * tv%SpV_avg(i,j,k)
+      enddo
+    else
+      do k=1,nz
+        dz(k) = GV%H_to_RZ * h(i,j,k) * tv%SpV_avg(i,j,k)
+      enddo
+    endif
+  else
+    if (use_doconcurrent) then
+      do concurrent (k=1:nz)
+        dz(k) = GV%H_to_Z * h(i,j,k)
+      enddo
+    else
+      do k=1,nz
+        dz(k) = GV%H_to_Z * h(i,j,k)
+      enddo
+    endif
+  endif
+
+end subroutine thickness_to_dz_column
 
 
 !> Convert mixed layer depths in height units into the thickness of water in the mixed
