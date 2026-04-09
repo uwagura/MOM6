@@ -170,14 +170,14 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     diag_S2_init, & ! Diagnostic of S2 as provided to this routine [T-2 ~> s-2]
     diag_N2_mean, & ! Diagnostic of N2 averaged over the timestep applied [T-2 ~> s-2]
     diag_S2_mean ! Diagnostic of S2 averaged over the timestep applied [T-2 ~> s-2]
-  real, dimension(SZI_(G),SZK_(GV)) :: &
-    h_2d, &             ! A 2-D version of h [H ~> m or kg m-2].
-    dz_2d, &            ! Vertical distance between interface heights [Z ~> m].
-    u_2d, v_2d, &       ! 2-D versions of u_in and v_in, converted to [L T-1 ~> m s-1].
-    T_2d, S_2d, rho_2d  ! 2-D versions of T [C ~> degC], S [S ~> ppt], and rho [R ~> kg m-3].
-  real, dimension(SZI_(G),SZK_(GV)+1) :: &
-    kappa_2d, & ! 2-D version of kappa_io [H Z T-1 ~> m2 s-1 or Pa s]
-    tke_2d      ! 2-D version tke_io [Z2 T-2 ~> m2 s-2].
+  real, dimension(SZK_(GV)) :: &
+    h_1d, &             ! A 1-D column version of h [H ~> m or kg m-2].
+    dz_1d, &            ! Vertical distance between interface heights [Z ~> m].
+    u_1d, v_1d, &       ! 1-D column versions of u_in and v_in, converted to [L T-1 ~> m s-1].
+    T_1d, S_1d, rho_1d  ! 1-D column versions of T [C ~> degC], S [S ~> ppt], and rho [R ~> kg m-3].
+  real, dimension(SZK_(GV)+1) :: &
+    kappa_1d, & ! 1-D column version of kappa_io [H Z T-1 ~> m2 s-1 or Pa s]
+    tke_1d      ! 1-D column version tke_io [Z2 T-2 ~> m2 s-2].
   real, dimension(SZK_(GV)) :: &
     Idz, &      ! The inverse of the thickness of the merged layers [H-1 ~> m2 kg-1].
     h_lay, &    ! The layer thickness [H ~> m or kg m-2]
@@ -225,176 +225,181 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   if (CS%id_N2_mean>0) diag_N2_mean(:,:,:) = 0.0
   if (CS%id_S2_mean>0) diag_S2_mean(:,:,:) = 0.0
 
-  !$OMP parallel do default(private) shared(js,je,is,ie,nz,h,u_in,v_in,use_temperature,tv,G,GV,US, &
-  !$OMP                                     CS,kappa_io,dz_massless,k0dt,p_surf,dt,tke_io,kv_io, &
-  !$OMP                                     diag_N2_init,diag_S2_init,diag_N2_mean,diag_S2_mean)
-  do j=js,je
+  ! !$OMP parallel do default(private) shared(js,je,is,ie,nz,h,u_in,v_in,use_temperature,tv,G,GV,US, &
+  ! !$OMP                                     CS,kappa_io,dz_massless,k0dt,p_surf,dt,tke_io,kv_io, &
+  ! !$OMP                                     diag_N2_init,diag_S2_init,diag_N2_mean,diag_S2_mean)
 
+  !---------------------------------------
+  ! Work on each column.
+  !---------------------------------------
+  do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
+    
     ! Convert layer thicknesses into geometric thickness in height units.
-    call thickness_to_dz(h, tv, dz_2d, j, G, GV)
+    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV)
 
-    do k=1,nz ; do i=is,ie
-      h_2d(i,k) = h(i,j,k)
-      u_2d(i,k) = u_in(i,j,k) ; v_2d(i,k) = v_in(i,j,k)
-    enddo ; enddo
-    if (use_temperature) then ; do k=1,nz ; do i=is,ie
-      T_2d(i,k) = tv%T(i,j,k) ; S_2d(i,k) = tv%S(i,j,k)
-    enddo ; enddo ; else ; do k=1,nz ; do i=is,ie
-      rho_2d(i,k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
-    enddo ; enddo ; endif
+    do k=1,nz
+      h_1d(k) = h(i,j,k)
+      u_1d(k) = u_in(i,j,k) 
+      v_1d(k) = v_in(i,j,k)
+      if (use_temperature) then 
+        T_1d(k) = tv%T(i,j,k)
+        S_1d(k) = tv%S(i,j,k)
+      else 
+        rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
+      endif
+    enddo
 
-!---------------------------------------
-! Work on each column.
-!---------------------------------------
-    do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
-    ! call cpu_clock_begin(id_clock_setup)
+    ! Store a transposed version of the initial arrays.
+    ! Any elimination of massless layers would occur here.
+    if (CS%eliminate_massless) then
+      nzc = 1
+      ! This section just finds massive layers and sets the values of
+      ! various variables in those layers.
+      do k=1,nz
+        ! Zero out the thicknesses of all layers, even if they are unused.
+        h_lay(k) = 0.0 ; dz_lay(k) = 0.0 ; u0xdz(k) = 0.0 ; v0xdz(k) = 0.0
+        T0xdz(k) = 0.0 ; S0xdz(k) = 0.0
 
-      ! Store a transposed version of the initial arrays.
-      ! Any elimination of massless layers would occur here.
-      if (CS%eliminate_massless) then
-        nzc = 1
-        do k=1,nz
-          ! Zero out the thicknesses of all layers, even if they are unused.
-          h_lay(k) = 0.0 ; dz_lay(k) = 0.0 ; u0xdz(k) = 0.0 ; v0xdz(k) = 0.0
-          T0xdz(k) = 0.0 ; S0xdz(k) = 0.0
+        ! Add a new layer if this one has mass.
+!          if ((h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless)) nzc = nzc+1
+        if ((k>CS%nkml) .and. (h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless)) then 
+          nzc = nzc+1
+        endif
 
-          ! Add a new layer if this one has mass.
-!          if ((h_lay(nzc) > 0.0) .and. (h_2d(i,k) > dz_massless)) nzc = nzc+1
-          if ((k>CS%nkml) .and. (h_lay(nzc) > 0.0) .and. &
-              (h_2d(i,k) > dz_massless)) nzc = nzc+1
-
-          ! Only merge clusters of massless layers.
+        ! Only merge clusters of massless layers.
 !         if ((h_lay(nzc) > dz_massless) .or. &
-!             ((h_lay(nzc) > 0.0) .and. (h_2d(i,k) > dz_massless))) nzc = nzc+1
+!             ((h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless))) nzc = nzc+1
 
-          kc(k) = nzc
-          h_lay(nzc) = h_lay(nzc) + h_2d(i,k)
-          dz_lay(nzc) = dz_lay(nzc) + dz_2d(i,k)
-          u0xdz(nzc) = u0xdz(nzc) + u_2d(i,k)*h_2d(i,k)
-          v0xdz(nzc) = v0xdz(nzc) + v_2d(i,k)*h_2d(i,k)
-          if (use_temperature) then
-            T0xdz(nzc) = T0xdz(nzc) + T_2d(i,k)*h_2d(i,k)
-            S0xdz(nzc) = S0xdz(nzc) + S_2d(i,k)*h_2d(i,k)
-          else
-            T0xdz(nzc) = T0xdz(nzc) + rho_2d(i,k)*h_2d(i,k)
-            S0xdz(nzc) = S0xdz(nzc) + rho_2d(i,k)*h_2d(i,k)
-          endif
+        kc(k) = nzc
+        h_lay(nzc) = h_lay(nzc) + h_1d(k)
+        dz_lay(nzc) = dz_lay(nzc) + dz_1d(k)
+        u0xdz(nzc) = u0xdz(nzc) + u_1d(k)*h_1d(k)
+        v0xdz(nzc) = v0xdz(nzc) + v_1d(k)*h_1d(k)
+        if (use_temperature) then
+          T0xdz(nzc) = T0xdz(nzc) + T_1d(k)*h_1d(k)
+          S0xdz(nzc) = S0xdz(nzc) + S_1d(k)*h_1d(k)
+        else
+          T0xdz(nzc) = T0xdz(nzc) + rho_1d(k)*h_1d(k)
+          S0xdz(nzc) = S0xdz(nzc) + rho_1d(k)*h_1d(k)
+        endif
+      enddo
+      kc(nz+1) = nzc+1
+
+      ! Set up Idz as the inverse of layer thicknesses.
+      do k=1,nzc ; Idz(k) = 1.0 / h_lay(k) ; enddo
+
+      !   Now determine kf, the fractional weight of interface kc when
+      ! interpolating between interfaces kc and kc+1.
+      kf(1) = 0.0 ; dz_in_lay = h_1d(1)
+      do k=2,nz
+        if (kc(k) > kc(k-1)) then
+          kf(k) = 0.0 
+          dz_in_lay = h_1d(k)
+        else
+          kf(k) = dz_in_lay*Idz(kc(k))
+            dz_in_lay = dz_in_lay + h_1d(k)
+        endif
+      enddo
+      kf(nz+1) = 0.0
+    else
+      do k=1,nz
+        h_lay(k) = h_1d(k)
+        dz_lay(k) = dz_1d(k)
+        u0xdz(k) = u_1d(k)*h_lay(k) ; v0xdz(k) = v_1d(k)*h_lay(k)
+      enddo
+      if (use_temperature) then
+        do k=1,nz
+          T0xdz(k) = T_1d(k)*h_lay(k) ; S0xdz(k) = S_1d(k)*h_lay(k)
         enddo
-        kc(nz+1) = nzc+1
-
-        ! Set up Idz as the inverse of layer thicknesses.
-        do k=1,nzc ; Idz(k) = 1.0 / h_lay(k) ; enddo
-
-        !   Now determine kf, the fractional weight of interface kc when
-        ! interpolating between interfaces kc and kc+1.
-        kf(1) = 0.0 ; dz_in_lay = h_2d(i,1)
-        do k=2,nz
-          if (kc(k) > kc(k-1)) then
-            kf(k) = 0.0 ; dz_in_lay = h_2d(i,k)
-          else
-            kf(k) = dz_in_lay*Idz(kc(k)) ; dz_in_lay = dz_in_lay + h_2d(i,k)
-          endif
-        enddo
-        kf(nz+1) = 0.0
       else
         do k=1,nz
-          h_lay(k) = h_2d(i,k)
-          dz_lay(k) = dz_2d(i,k)
-          u0xdz(k) = u_2d(i,k)*h_lay(k) ; v0xdz(k) = v_2d(i,k)*h_lay(k)
+          T0xdz(k) = rho_1d(k)*h_lay(k) ; S0xdz(k) = rho_1d(k)*h_lay(k)
         enddo
-        if (use_temperature) then
-          do k=1,nz
-            T0xdz(k) = T_2d(i,k)*h_lay(k) ; S0xdz(k) = S_2d(i,k)*h_lay(k)
-          enddo
-        else
-          do k=1,nz
-            T0xdz(k) = rho_2d(i,k)*h_lay(k) ; S0xdz(k) = rho_2d(i,k)*h_lay(k)
-          enddo
-        endif
-        nzc = nz
-        do k=1,nzc+1 ; kc(k) = k ; kf(k) = 0.0 ; enddo
       endif
-      f2 = 0.25 * ((G%Coriolis2Bu(I,J) + G%Coriolis2Bu(I-1,J-1)) + &
-                   (G%Coriolis2Bu(I,J-1) + G%Coriolis2Bu(I-1,J)))
-      surface_pres = 0.0 ; if (associated(p_surf)) surface_pres = p_surf(i,j)
+      nzc = nz
+      do k=1,nzc+1 ; kc(k) = k ; kf(k) = 0.0 ; enddo
+    endif
+    f2 = 0.25 * ((G%Coriolis2Bu(I,J) + G%Coriolis2Bu(I-1,J-1)) + &
+                  (G%Coriolis2Bu(I,J-1) + G%Coriolis2Bu(I-1,J)))
+    surface_pres = 0.0 ; if (associated(p_surf)) surface_pres = p_surf(i,j)
 
     ! ----------------------------------------------------    I_Ld2_1d, dz_Int_1d
 
     ! Set the initial guess for kappa, here defined at interfaces.
     ! ----------------------------------------------------
-      do K=1,nzc+1 ; kappa(K) = CS%kappa_seed ; enddo
+    do K=1,nzc+1
+      kappa(K) = CS%kappa_seed
+    enddo
 
-      call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
-                              h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                              tv, CS, GV, US)
+    call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
+                            h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
+                            tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+                            tv, CS, GV, US)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
-      if (nz == nzc) then
-        do K=1,nz+1
-          kappa_2d(i,K) = kappa_avg(K)
-          if (CS%all_layer_TKE_bug) then
-            tke_2d(i,K) = tke(K)
-          else
-            tke_2d(i,K) = tke_avg(K)
-          endif
-        enddo
-        if (CS%id_N2_mean>0) then ; do K=1,nz+1
-          diag_N2_mean(i,j,K) = N2_mean(K)
-        enddo ; endif
-        if (CS%id_S2_mean>0) then ; do K=1,nz+1
-          diag_S2_mean(i,j,K) = S2_mean(K)
-        enddo ; endif
-        if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
-          diag_N2_init(i,j,K) = N2_init(K)
-        enddo ; endif
-        if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
-          diag_S2_init(i,j,K) = S2_init(K)
-        enddo ; endif
-      else
-        do K=1,nz+1
-          if (kf(K) == 0.0) then
-            kappa_2d(i,K) = kappa_avg(kc(K))
-            tke_2d(i,K) = tke_avg(kc(K))
-          else
-            kappa_2d(i,K) = (1.0-kf(K)) * kappa_avg(kc(K)) + kf(K) * kappa_avg(kc(K)+1)
-            tke_2d(i,K) = (1.0-kf(K)) * tke_avg(kc(K)) + kf(K) * tke_avg(kc(K)+1)
-          endif
-        enddo
-        do K=1,nz+1
-          if (kf(K) == 0.0) then
-            if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(kc(K))
-            if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(kc(K))
-            if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(i,j,K) = N2_init(kc(K))
-            if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(i,j,K) = S2_init(kc(K))
-          else
-            if (CS%id_N2_mean>0) &
-              diag_N2_mean(i,j,K) = (1.0-kf(K)) * N2_mean(kc(K)) + kf(K) * N2_mean(kc(K)+1)
-            if (CS%id_S2_mean>0) &
-              diag_S2_mean(i,j,K) = (1.0-kf(K)) * S2_mean(kc(K)) + kf(K) * S2_mean(kc(K)+1)
-            if ((CS%id_N2_init>0) .or. CS%debug) &
-              diag_N2_init(i,j,K) = (1.0-kf(K)) * N2_init(kc(K)) + kf(K) * N2_init(kc(K)+1)
-            if ((CS%id_S2_init>0) .or. CS%debug) &
-              diag_S2_init(i,j,K) = (1.0-kf(K)) * S2_init(kc(K)) + kf(K) * S2_init(kc(K)+1)
-          endif
-        enddo
-      endif
-    ! call cpu_clock_end(id_clock_setup)
-    else  ! Land points, still inside the i-loop.
+    if (nz == nzc) then
+      ! kappa_avg -> kappa_1d and tke_avg -> tke_1d. Columnar values just become 1d fields.
       do K=1,nz+1
-        kappa_2d(i,K) = 0.0 ; tke_2d(i,K) = 0.0
+        kappa_1d(K) = kappa_avg(K)
+        if (CS%all_layer_TKE_bug) then
+          tke_1d(K) = tke(K)
+        else
+          tke_1d(K) = tke_avg(K)
+        endif
       enddo
-    endif ; enddo ! i-loop
+      ! Diagnostics
+      if (CS%id_N2_mean>0) then ; do K=1,nz+1
+        diag_N2_mean(i,j,K) = N2_mean(K)
+      enddo ; endif
+      if (CS%id_S2_mean>0) then ; do K=1,nz+1
+        diag_S2_mean(i,j,K) = S2_mean(K)
+      enddo ; endif
+      if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
+        diag_N2_init(i,j,K) = N2_init(K)
+      enddo ; endif
+      if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
+        diag_S2_init(i,j,K) = S2_init(K)
+      enddo ; endif
+    else
+      ! Could these do loops be combined?
+      do K=1,nz+1
+        if (kf(K) == 0.0) then
+          kappa_1d(K) = kappa_avg(kc(K))
+          tke_1d(K) = tke_avg(kc(K))
+        else
+          kappa_1d(K) = (1.0-kf(K)) * kappa_avg(kc(K)) + kf(K) * kappa_avg(kc(K)+1)
+          tke_1d(K) = (1.0-kf(K)) * tke_avg(kc(K)) + kf(K) * tke_avg(kc(K)+1)
+        endif
+      enddo
+      do K=1,nz+1
+        if (kf(K) == 0.0) then
+          if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(kc(K))
+          if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(kc(K))
+          if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(i,j,K) = N2_init(kc(K))
+          if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(i,j,K) = S2_init(kc(K))
+        else
+          if (CS%id_N2_mean>0) &
+            diag_N2_mean(i,j,K) = (1.0-kf(K)) * N2_mean(kc(K)) + kf(K) * N2_mean(kc(K)+1)
+          if (CS%id_S2_mean>0) &
+            diag_S2_mean(i,j,K) = (1.0-kf(K)) * S2_mean(kc(K)) + kf(K) * S2_mean(kc(K)+1)
+          if ((CS%id_N2_init>0) .or. CS%debug) &
+            diag_N2_init(i,j,K) = (1.0-kf(K)) * N2_init(kc(K)) + kf(K) * N2_init(kc(K)+1)
+          if ((CS%id_S2_init>0) .or. CS%debug) &
+            diag_S2_init(i,j,K) = (1.0-kf(K)) * S2_init(kc(K)) + kf(K) * S2_init(kc(K)+1)
+        endif
+      enddo
+    endif ! end of if (nz == nzc)
+    ! call cpu_clock_end(id_clock_setup)
 
-    do K=1,nz+1 ; do i=is,ie
-      kappa_io(i,j,K) = G%mask2dT(i,j) * kappa_2d(i,K)
-      tke_io(i,j,K) = G%mask2dT(i,j) * tke_2d(i,K)
-      kv_io(i,j,K) = ( G%mask2dT(i,j) * kappa_2d(i,K) ) * CS%Prandtl_turb
-
-    enddo ; enddo
-
-  enddo ! end of j-loop
+    ! 1d -> 3d extrapolation.  This just applies the land mask to the 1d fields.
+    do K=1,nz+1
+      kappa_io(i,j,K) =  kappa_1d(K)
+      tke_io(i,j,K) = tke_1d(K)
+      kv_io(i,j,K) = kappa_1d(K) * CS%Prandtl_turb
+    enddo
+ 
+  endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
 
   if (CS%debug) then
     call hchksum(diag_N2_init, "kappa_shear N2_init", G%HI, unscale=US%s_to_T**2)
@@ -1030,6 +1035,9 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   ! adjacent layer centers.
   I_dz_int(1) = 2.0 / dz_lay(1)
   dist_from_top(1) = 0.0 ; h_from_top(1) = 0.0
+  ! UMW + AI: The distance between layer centers is the average of the thicknesses of the two layers, 
+  ! so the inverse is 2 divided by the sum of the thicknesses.
+  ! Add up distances and thicknessess from the top as well 
   do K=2,nzc
     I_dz_int(K) = 2.0 / (dz_lay(k-1) + dz_lay(k))
     dist_from_top(K) = dist_from_top(K-1) + dz_lay(k-1)
