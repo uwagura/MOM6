@@ -131,6 +131,7 @@ subroutine MOM_domains_init(MOM_dom, param_file, symmetric, static_memory, &
   character(len=200) :: mask_table ! The file name and later the full path to the diag table
   character(len=64)  :: inc_nm     ! The name of the memory include file
   character(len=200) :: mesg       ! A string to use for error messages
+  logical            :: do_unmasked_ocn_geo ! If true, create an unmasked domain for the ocean geometry file.
 
   integer :: nip_parsed, njp_parsed
   character(len=8) :: char_xsiz, char_ysiz, char_niglobal, char_njglobal
@@ -447,10 +448,15 @@ subroutine MOM_domains_init(MOM_dom, param_file, symmetric, static_memory, &
 
   ! Create an unmasked domain if requested. This is used for writing out unmasked ocean geometry.
   if (present(MOM_dom_unmasked) .and. mask_table_exists) then
-    call MOM_define_layout(n_global, PEs_used, layout_unmasked)
-    call create_MOM_domain(MOM_dom_unmasked, n_global, n_halo, reentrant, tripolar_N, layout_unmasked, &
-                           domain_name=domain_name, symmetric=symmetric, thin_halos=thin_halos, &
-                           nonblocking=nonblocking)
+    call get_param(param_file, mdl, "SAVE_UNMASKED_GEOM_FILE", do_unmasked_ocn_geo, &
+                   "If true and a mask table is used, create an unmasked MOM domain that is "//&
+                   "saved in the ocean geometry file.", default=.false.)
+    if (do_unmasked_ocn_geo) then
+      call MOM_define_layout(n_global, PEs_used, layout_unmasked)
+      call create_MOM_domain(MOM_dom_unmasked, n_global, n_halo, reentrant, tripolar_N, layout_unmasked, &
+                             domain_name=domain_name, symmetric=symmetric, thin_halos=thin_halos, &
+                             nonblocking=nonblocking)
+    endif
   endif
 
   call create_MOM_domain(MOM_dom, n_global, n_halo, reentrant, tripolar_N, layout, &
