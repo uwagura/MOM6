@@ -17,7 +17,7 @@ use MOM_interface_heights, only : thickness_to_dz
 use MOM_unit_scaling,      only : unit_scale_type
 use MOM_variables,         only : thermo_var_ptrs
 use MOM_verticalGrid,      only : verticalGrid_type
-use MOM_EOS,               only : calculate_density_derivs
+use MOM_EOS,               only : calculate_density_derivs, calculate_density_derivs_dev
 use MOM_EOS,               only : calculate_density, calculate_specific_vol_derivs
 
 implicit none ; private
@@ -1059,6 +1059,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 
   !   Determine the velocities and thicknesses after eliminating massless
   ! layers and applying a time-step of background diffusion.
+  ! UMW description: Update U,V,T,S within column using background diffusivity
+  ! (kappa_0) alone. 
   if (nzc > 1) then
     a1(2) = k0dt*I_dz_int(2)
     b1 = 1.0 / (hlay(1) + a1(2))
@@ -1141,7 +1143,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
       Sal_int(K) = 0.5*(Sal(k-1) + Sal(k))
     enddo
     if (GV%Boussinesq .or. GV%semi_Boussinesq) then
-      call calculate_density_derivs(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
+      call calculate_density_derivs_dev(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
                                     tv%eqn_of_state, (/2,nzc/), scale=-g_R0 )
     else
       ! These should perhaps be combined into a single call to calculate the thermal expansion
@@ -1234,6 +1236,11 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         tol_chg(K) = tol2 * local_src_avg(K)
       enddo
 
+      ! UMW + AI description: Find timestep that changes kappa_src within
+      ! Preset tolerances.  This is done by halving the timestep until the changes are
+      ! acceptable, and then refining the estimate by testing additional timesteps between
+      ! the last acceptable and first unacceptable timesteps.  The halving is done in a
+      ! loop that is allowed to run up to (max_KS_it+1-itt)/2 times. 
       do itt_dt=1,(CS%max_KS_it+1-itt)/2
         !   The maximum number of times that the time-step is halved in
         ! seeking an acceptable timestep is reduced with each iteration,
@@ -1272,6 +1279,11 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         if (valid_dt) exit
         dt_test = 0.5*dt_test
       enddo
+      ! UMW +AI description: If the halving loop found an acceptable time-step, then refine 
+      ! the estimate by testing additional time-steps between the last acceptable and first 
+      ! unacceptable time-steps.  This is done by halving the increment to the time-step 
+      ! that is being tested until either the maximum number of refinements is reached or the 
+      ! time-step being tested is no longer less than the remaining time.
       if ((dt_test < dt_rem) .and. valid_dt) then
         dt_inc = 0.5*dt_test
         do itt_dt=1,dt_refinements
@@ -1310,6 +1322,12 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   ! call cpu_clock_end(id_clock_project)
 
     ! The state has already been projected forward. Now find new values of kappa.
+
+    ! UMW + AI : use updated value of dt_now to recalcualte
+    ! kappa_out, and then find the average value of kappa over the time step, and
+    ! the average value of TKE over the time step.  If there is no mixing
+    ! (ke_kappa < ks_kappa)
+
 
     if (ke_kappa < ks_kappa) then
       ! There is no mixing now, and will not be again.

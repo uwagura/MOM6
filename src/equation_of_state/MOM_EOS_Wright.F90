@@ -15,6 +15,7 @@ public buggy_Wright_EOS
 public int_density_dz_wright, int_spec_vol_dp_wright
 public avg_spec_vol_buggy_Wright
 public set_params_buggy_Wright
+public calculate_density_derivs_elem_buggy_Wright_loc
 
 !>@{ Parameters in the Wright equation of state using the reduced range formula, which is a fit to the UNESCO
 !    equation of state for the restricted range: -2 < theta < 30 [degC], 28 < S < 38 [PSU], 0  < p < 5e7 [Pa].
@@ -195,8 +196,10 @@ real elemental function spec_vol_anomaly_elem_buggy_Wright(this, T, S, pressure,
 end function spec_vol_anomaly_elem_buggy_Wright
 
 !> Calculate the partial derivatives of density with potential temperature and salinity
-!! using the buggy implementation of the equation of state, as fit by Wright, 1997
+!! using the buggy implementation of the equation of state, as fit by Wright, 1997.
+!! This version has no class(*) argument and can be called on GPU.
 elemental subroutine calculate_density_derivs_elem_buggy_Wright_loc( T, S, pressure, drho_dT, drho_dS)
+  !$omp declare target
   real,               intent(in)  :: T        !< Potential temperature relative to the surface [degC]
   real,               intent(in)  :: S        !< Salinity [PSU]
   real,               intent(in)  :: pressure !< Pressure [Pa]

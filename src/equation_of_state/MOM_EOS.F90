@@ -10,6 +10,7 @@ use MOM_EOS_linear, only : linear_EOS, avg_spec_vol_linear
 use MOM_EOS_linear, only : int_density_dz_linear, int_spec_vol_dp_linear
 use MOM_EOS_Wright, only : buggy_Wright_EOS, avg_spec_vol_buggy_Wright
 use MOM_EOS_Wright, only : int_density_dz_wright, int_spec_vol_dp_wright
+use MOM_EOS_Wright, only : calculate_density_derivs_elem_buggy_Wright_loc
 use MOM_EOS_Wright_full, only : Wright_full_EOS, avg_spec_vol_Wright_full
 use MOM_EOS_Wright_full, only : int_density_dz_wright_full, int_spec_vol_dp_wright_full
 use MOM_EOS_Wright_red,  only : Wright_red_EOS, avg_spec_vol_Wright_red
@@ -46,6 +47,7 @@ public calculate_compress
 public calculate_density_elem
 public calculate_density
 public calculate_density_derivs
+public calculate_density_derivs_dev
 public calculate_density_second_derivs
 public calculate_spec_vol
 public calculate_specific_vol_derivs
@@ -991,6 +993,65 @@ subroutine calculate_density_derivs_1d(T, S, pressure, drho_dT, drho_dS, EOS, do
   enddo ; endif
 
 end subroutine calculate_density_derivs_1d
+
+
+!> GPU-compatible density derivatives calculation using select-case dispatch instead of
+!! polymorphic dispatch. This avoids abstract type calls which are not supported on GPU
+!! by nvfortran. Currently only supports EOS_WRIGHT (Wright 1997).
+subroutine calculate_density_derivs_dev(T, S, pressure, drho_dT, drho_dS, EOS, dom, scale)
+  !$omp declare target
+  real, dimension(:),    intent(in)    :: T        !< Potential temperature referenced to the surface [C ~> degC]
+  real, dimension(:),    intent(in)    :: S        !< Salinity [S ~> ppt]
+  real, dimension(:),    intent(in)    :: pressure !< Pressure [R L2 T-2 ~> Pa]
+  real, dimension(:),    intent(inout) :: drho_dT  !< The partial derivative of density with potential
+                                                   !! temperature [R C-1 ~> kg m-3 degC-1]
+  real, dimension(:),    intent(inout) :: drho_dS  !< The partial derivative of density with salinity
+                                                   !! [R S-1 ~> kg m-3 ppt-1]
+  type(EOS_type),        intent(in)    :: EOS      !< Equation of state structure
+  integer, dimension(2), optional, intent(in) :: dom   !< The domain of indices to work on
+  real,                  optional, intent(in) :: scale !< A multiplicative factor by which to scale density
+
+  ! Local variables
+  real :: pres_i   ! Pressure at index i converted to [Pa]
+  real :: T_i      ! Temperature at index i converted to [degC]
+  real :: S_i      ! Salinity at index i converted to [ppt]
+  real :: dRdT_i, dRdS_i  ! Temporary derivatives [kg m-3 degC-1] and [kg m-3 ppt-1]
+  real :: rho_scale   ! A factor to convert density from kg m-3 to the desired units [R m3 kg-1 ~> 1]
+  real :: dRdT_scale  ! A factor to convert drho_dT to the desired units [R degC m3 C-1 kg-1 ~> 1]
+  real :: dRdS_scale  ! A factor to convert drho_dS to the desired units [R ppt m3 S-1 kg-1 ~> 1]
+  integer :: i, is, ie
+
+  if (present(dom)) then
+    is = dom(1) ; ie = dom(2)
+  else
+    is = 1 ; ie = size(drho_dT)
+  endif
+
+  ! Calculate scaling factors
+  rho_scale = EOS%kg_m3_to_R
+  if (present(scale)) rho_scale = rho_scale * scale
+  dRdT_scale = rho_scale * EOS%C_to_degC
+  dRdS_scale = rho_scale * EOS%S_to_ppt
+
+  select case (EOS%form_of_EOS)
+    case (EOS_WRIGHT)
+      do i=is,ie
+        ! Convert units
+        pres_i = EOS%RL2_T2_to_Pa * pressure(i)
+        T_i = EOS%C_to_degC * T(i)
+        S_i = EOS%S_to_ppt * S(i)
+        ! Call the GPU-compatible _loc function directly
+        call calculate_density_derivs_elem_buggy_Wright_loc(T_i, S_i, pres_i, dRdT_i, dRdS_i)
+        ! Apply scaling
+        drho_dT(i) = dRdT_scale * dRdT_i
+        drho_dS(i) = dRdS_scale * dRdS_i
+      enddo
+    case default
+      call MOM_error(FATAL, "calculate_density_derivs_dev: GPU dispatch not supported for this EOS. "// &
+                            "Currently only WRIGHT is supported.")
+  end select
+
+end subroutine calculate_density_derivs_dev
 
 
 !> Calls the appropriate subroutine to calculate density derivatives for 1-D array inputs.
