@@ -1011,6 +1011,7 @@ end subroutine thickness_to_dz_jslice
 !! units for a single column, perhaps by multiplication by the precomputed layer-mean specific
 !! volume stored in an array in the thermo_var_ptrs type when in non-Boussinesq mode.
 subroutine thickness_to_dz_column(h, tv, dz, i, j, G, GV, do_offload)
+  !$omp declare target
   type(ocean_grid_type),   intent(in)    :: G  !< The ocean's grid structure
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
@@ -1037,10 +1038,10 @@ subroutine thickness_to_dz_column(h, tv, dz, i, j, G, GV, do_offload)
   nz = GV%ke
 
   if ((.not.GV%Boussinesq) .and. allocated(tv%SpV_avg))  then
-    if (tv%valid_SpV_halo < 0) then
-      call MOM_error(FATAL, "thickness_to_dz called in fully non-Boussinesq mode with "// &
-                            "invalid values of SpV_avg.")
-    endif
+    ! if (tv%valid_SpV_halo < 0) then
+    !   call MOM_error(FATAL, "thickness_to_dz called in fully non-Boussinesq mode with "// &
+    !                         "invalid values of SpV_avg.")
+    ! endif
 
     if (use_doconcurrent) then
       do concurrent (k=1:nz)

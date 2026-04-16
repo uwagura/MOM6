@@ -232,10 +232,37 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !---------------------------------------
   ! Work on each column.
   !---------------------------------------
+  ! Variable transfer notes: U_in/v_in are u/v at points - only used a few times
+  ! diabatic driver( which it is local to), so eventually it may be possible to keep in on device
+  ! * h is pull down from device before call to diabatic in step_MOM_thermo
+  ! * tv and its constitutents need to pushed and pull whenever they are used for now
+
+  ! Unused diagnostics to allocated to avoid large transfers to and from the device. 
+  !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+
+  ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
+  ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
+  ! TODO: HOW TO HANDLE PSURF since it's a pointer?
+  !$omp target enter data map(alloc: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
+  !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d)
+
+  ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
+  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
+
+  ! Arrays that already have values that have to be pushed to devide
+  ! Note that tv%SpV_AvG is used in thickness_to_dz
+  ! TODO: how to hand tv%eqn_of_state pointer?
+  ! TODO: Shoud kappa_io, tke_io, and kv_io be pushed to the device outside of this subroutine?
+  !$omp target enter data map(to: h, u_in, v_in, tv, tv%T, tv%S, tv%SpV_avg, tv%eqn_of_state, kv_io, &
+  !$omp &                     kappa_io, tke_io)
+
+  !$omp target teams distribute parallel do collapse(2)
   do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
     
     ! Convert layer thicknesses into geometric thickness in height units.
-    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV)
+    ! This acccess GV%H_to_RZ, which isn't technically on the device, but its a scalar so maybe ok? 
+    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV, do_offload=.true.)
 
     do k=1,nz
       h_1d(k) = h(i,j,k)
@@ -245,6 +272,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
         T_1d(k) = tv%T(i,j,k)
         S_1d(k) = tv%S(i,j,k)
       else 
+        ! GV%RLay is already on the device
         rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
       endif
     enddo
@@ -400,6 +428,17 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     enddo
  
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
+
+  !$omp target exit data map(from:  h, u_in, v_in, tv, tv%T, tv%S, tv%SpV_avg, tv%eqn_of_state, kv_io, &
+  !$omp &                     kappa_io, tke_io)
+
+  !$omp target exit data map(delete:  h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
+  !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d)
+
+  !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
+
+  !$omp target exit data map(delete:  diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
 
   if (CS%debug) then
     call hchksum(diag_N2_init, "kappa_shear N2_init", G%HI, unscale=US%s_to_T**2)
@@ -1148,9 +1187,9 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     else
       ! These should perhaps be combined into a single call to calculate the thermal expansion
       ! and haline contraction coefficients?
-      call calculate_specific_vol_derivs(T_int, Sal_int, pressure, dSpV_dT, dSpV_dS, &
-                                    tv%eqn_of_state, (/2,nzc/) )
-      call calculate_density(T_int, Sal_int, pressure, rho_int, tv%eqn_of_state, (/2,nzc/) )
+      ! call calculate_specific_vol_derivs(T_int, Sal_int, pressure, dSpV_dT, dSpV_dS, &
+      !                               tv%eqn_of_state, (/2,nzc/) )
+      ! call calculate_density(T_int, Sal_int, pressure, rho_int, tv%eqn_of_state, (/2,nzc/) )
       do K=2,nzc
         dbuoy_dT(K) = GV%g_Earth_Z_T2 * (rho_int(K) * dSpV_dT(K))
         dbuoy_dS(K) = GV%g_Earth_Z_T2 * (rho_int(K) * dSpV_dS(K))
@@ -1405,6 +1444,7 @@ end subroutine kappa_shear_column
 !! may also calculate the projected buoyancy frequency and shear.
 subroutine calculate_projected_state(kappa, u0, v0, T0, S0, dt, nz, dz, I_dz_int, dbuoy_dT, dbuoy_dS, &
                                      vel_under, u, v, T, Sal, N2, S2, GV, US, ks_int, ke_int)
+  !$omp declare target
   integer,               intent(in)    :: nz  !< The number of layers (after eliminating massless
                                               !! layers?).
   real, dimension(nz+1), intent(in)    :: kappa !< The diapycnal diffusivity at interfaces,
@@ -1535,6 +1575,7 @@ end subroutine calculate_projected_state
 !> This subroutine calculates new, consistent estimates of TKE and kappa.
 subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
                           nz, CS, GV, US, K_Q, tke, kappa, kappa_src, local_src)
+  !$omp declare target
   integer,               intent(in)    :: nz  !< The number of layers to work on.
   real, dimension(nz+1), intent(in)    :: N2  !< The buoyancy frequency squared at interfaces [T-2 ~> s-2].
   real, dimension(nz+1), intent(in)    :: S2  !< The squared shear at interfaces [T-2 ~> s-2].

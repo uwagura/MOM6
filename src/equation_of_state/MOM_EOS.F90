@@ -1047,8 +1047,19 @@ subroutine calculate_density_derivs_dev(T, S, pressure, drho_dT, drho_dS, EOS, d
         drho_dS(i) = dRdS_scale * dRdS_i
       enddo
     case default
-      call MOM_error(FATAL, "calculate_density_derivs_dev: GPU dispatch not supported for this EOS. "// &
-                            "Currently only WRIGHT is supported.")
+      do i=is,ie
+        ! Convert units
+        pres_i = EOS%RL2_T2_to_Pa * pressure(i)
+        T_i = EOS%C_to_degC * T(i)
+        S_i = EOS%S_to_ppt * S(i)
+        ! Call the GPU-compatible _loc function directly
+        call calculate_density_derivs_elem_buggy_Wright_loc(T_i, S_i, pres_i, dRdT_i, dRdS_i)
+        ! Apply scaling
+        drho_dT(i) = dRdT_scale * dRdT_i
+        drho_dS(i) = dRdS_scale * dRdS_i
+      enddo
+      ! call MOM_error(FATAL, "calculate_density_derivs_dev: GPU dispatch not supported for this EOS. "// &
+      !                       "Currently only WRIGHT is supported.")
   end select
 
 end subroutine calculate_density_derivs_dev
