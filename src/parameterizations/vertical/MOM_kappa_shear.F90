@@ -230,10 +230,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   if (CS%id_N2_mean>0) diag_N2_mean(:,:,:) = 0.0
   if (CS%id_S2_mean>0) diag_S2_mean(:,:,:) = 0.0
 
-  ! !$OMP parallel do default(private) shared(js,je,is,ie,nz,h,u_in,v_in,use_temperature,tv,G,GV,US, &
-  ! !$OMP                                     CS,kappa_io,dz_massless,k0dt,p_surf,dt,tke_io,kv_io, &
-  ! !$OMP                                     diag_N2_init,diag_S2_init,diag_N2_mean,diag_S2_mean)
-
   !---------------------------------------
   ! Work on each column.
   !---------------------------------------
@@ -270,7 +266,10 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp target enter data map(to: h, u_in, v_in, kappa_io, tke_io)
   !$omp target enter data map(to: T_ptr, S_ptr) if(use_temperature)
 
-  !$omp target teams distribute parallel do collapse(2)
+  !$omp target teams distribute parallel do collapse(2) private(h_1d, u_1d, v_1d, T_1d, S_1d, &
+  !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz, tke_avg, kappa_avg, &
+  !$omp &                 N2_init, S2_init, N2_mean, S2_mean, tke)
   do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
     
     ! Convert layer thicknesses into geometric thickness in height units.
@@ -1279,10 +1278,10 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     ! Determine the range of non-zero values of kappa_out.
     ks_kappa = GV%ke+1 ; ke_kappa = 0
     do K=2,nzc ; if (kappa_out(K) > 0.0) then
-      ks_kappa = K !; exit
+      ks_kappa = K ; exit
     endif ; enddo
     do k=nzc,ks_kappa,-1 ; if (kappa_out(K) > 0.0) then
-      ke_kappa = K !; exit
+      ke_kappa = K ; exit
     endif ; enddo
     if (ke_kappa == nzc) kappa_out(nzc+1) = 0.0
   ! call cpu_clock_end(id_clock_avg)
@@ -1326,22 +1325,22 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
             if (CS%restrictive_tolerance_check) then
               if ((K_src(K) > min(tol_max(K), kappa_src(K) + Idtt*tol_chg(K))) .or. &
                   (K_src(K) < max(tol_min(K), kappa_src(K) - Idtt*tol_chg(K)))) then
-                valid_dt = .false. !; exit
+                valid_dt = .false. ; exit
               endif
             else
               if ((K_src(K) > max(tol_max(K), kappa_src(K) + Idtt*tol_chg(K))) .or. &
                   (K_src(K) < min(tol_min(K), kappa_src(K) - Idtt*tol_chg(K)))) then
-                valid_dt = .false. !; exit
+                valid_dt = .false. ; exit
               endif
             endif
           else
             if (0.0 < min(tol_min(K), kappa_src(K) - Idtt*tol_chg(K))) then
-              valid_dt = .false. !; k_src(K) = 0.0 ; exit
+              valid_dt = .false. ; k_src(K) = 0.0 ; exit
             endif
           endif
         enddo
 
-        ! if (valid_dt) exit
+        if (valid_dt) exit
         dt_test = 0.5*dt_test
       enddo
       ! UMW +AI description: If the halving loop found an acceptable time-step, then refine 
@@ -1459,7 +1458,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     ! call cpu_clock_end(id_clock_project)
     endif
 
-    ! if (dt_rem <= 0.0) exit
+    if (dt_rem <= 0.0) exit
 
   enddo ! end itt loop
 
@@ -1854,10 +1853,10 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
           do K=ke_tke+1,nz+1
             dQ(K) = e1(K)*dQ(K-1)
             tke(K) = max(tke(K) + dQ(K), TKE_min)
-            !if (abs(dQ(K)) < roundoff*tke(K)) exit
+            if (abs(dQ(K)) < roundoff*tke(K)) exit
           enddo
           do K2=K+1,nz
-            !if (dQ(K2) == 0.0) exit
+            if (dQ(K2) == 0.0) exit
             dQ(K2) = 0.0
           enddo
         endif
@@ -1891,7 +1890,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Neglect values that are smaller than kappa_trunc.
         if (kappa(K) < cKcomp*kappa_trunc) then
           kappa(K) = 0.0
-          !if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
+          if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
         elseif (kappa(K) < 2.0*cKcomp*kappa_trunc) then
           kappa(K) = 2.0 * (kappa(K) - cKcomp*kappa_trunc)
         endif
@@ -1906,7 +1905,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Neglect values that are smaller than kappa_trunc.
         if (kappa(K) <= kappa_trunc) then
           kappa(K) = 0.0
-          !if (K < ks_src) then ; ks_kappa = k+1 ; K_Q(K) = 0.0 ; exit ; endif
+          if (K < ks_src) then ; ks_kappa = k+1 ; K_Q(K) = 0.0 ; exit ; endif
         elseif (kappa(K) < 2.0*kappa_trunc) then
           kappa(K) = 2.0 * (kappa(K) - kappa_trunc)
         endif
@@ -1946,7 +1945,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Ensure that the pivot is always positive, and that 0 <= cK <= 1.
         ! Otherwise do not use Newton's method.
         decay_term_k = -Idz(k-1)*dQmdK(K)*dKdQ(K-1) + h_Int(K)*I_Ld2(K)
-        !if (decay_term_k < 0.0) then ; abort_Newton = .true. ; exit ; endif
+        if (decay_term_k < 0.0) then ; abort_Newton = .true. ; exit ; endif
         bK = 1.0 / (Idz(k) + Idz(k-1)*cKcomp + decay_term_k)
 
         cK(K+1) = bK * Idz(k)
@@ -1963,7 +1962,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Truncate away negligibly small values of kappa.
         if (dK(K) <= cKcomp*(kappa_trunc - kappa(K))) then
           dK(K) = -cKcomp*kappa(K)
-!         if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
+        if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
         elseif (dK(K) < cKcomp*(2.0*kappa_trunc - kappa(K))) then
           dK(K) = 2.0 * dK(K) - cKcomp*(2.0*kappa_trunc - kappa(K))
         endif
@@ -1981,7 +1980,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Ensure that the pivot is always positive, and that 0 <= cQ <= 1.
         ! Otherwise do not use Newton's method.
         decay_term_Q = h_Int(K)*TKE_decay(K) - dQdz(k-1)*dKdQ(K-1)*cQ(K) - v2*dKdQ(K)
-        !if (decay_term_Q < 0.0) then ; abort_Newton = .true. ; exit ; endif
+        if (decay_term_Q < 0.0) then ; abort_Newton = .true. ; exit ; endif
         bQ = 1.0 / (aQ(k) + (cQcomp*aQ(k-1) + decay_term_Q))
 
         cQ(K+1) = aQ(k) * bQ
@@ -1996,7 +1995,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         if ((itt > 1) .and. (K > ke_src) .and. (dK(K) == 0.0) .and. &
             ((kappa(K) + kappa(K+1)) == 0.0)) then
         ! Could also do  .and. (bQ*abs(tke_src) < roundoff*TKE(K)) then
-          ke_kappa = k-1 !; exit
+          ke_kappa = k-1 ; exit
         endif
       enddo
       if ((ke_kappa == nz) .and. (.not. abort_Newton)) then
@@ -2035,7 +2034,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Ensure that TKE+dQ will not drop below 0.5*TKE.
           dQ(K) = max(e1(K)*dQ(K-1),-0.5*TKE(K))
           TKE(K) = max(TKE(K) + dQ(K), TKE_min)
-          !if (abs(dQ(K)) < roundoff*TKE(K)) exit
+          if (abs(dQ(K)) < roundoff*TKE(K)) exit
         enddo
         if (debug_soln) then ; do K2=K+1,nz+1 ; dQ(K2) = 0.0 ; dK(K2) = 0.0 ; enddo ; endif
       endif
@@ -2104,13 +2103,13 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         kappa_mean = kappa0 + (kappa(K) - 0.5*dK(K))
         if (abs(dK(K)) > Newton_test * kappa_mean) then
           if (do_Newton) abort_Newton = .true.
-          within_tolerance = .false. ; do_Newton = .false. !; exit
+          within_tolerance = .false. ; do_Newton = .false. ; exit
         elseif (abs(dK(K)) > tol_err * kappa_mean) then
-          within_tolerance = .false. ; !if (.not.do_Newton) exit
+          within_tolerance = .false. ; if (.not.do_Newton) exit
         endif
         if (abs(dQ(K)) > Newton_test*(tke(K) - 0.5*dQ(K))) then
           if (do_Newton) abort_Newton = .true.
-          do_Newton = .false. ; !if (.not.within_tolerance) exit
+          do_Newton = .false. ; if (.not.within_tolerance) exit
         endif
       enddo
 
@@ -2118,7 +2117,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
       within_tolerance = .true.
       do K=min(ks_kappa,ks_kappa_prev),max(ke_kappa,ke_kappa_prev)
         if (abs(dK(K)) > tol_err * (kappa0 + (kappa(K) - 0.5*dK(K)))) then
-          within_tolerance = .false. !;  exit
+          within_tolerance = .false. ; exit
         endif
       enddo
     endif
@@ -2131,7 +2130,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
       do K=2,nz ; K_Q(K) = kappa(K) / max(TKE(K), TKE_min) ; enddo
     endif
 
-    !if (within_tolerance) exit
+    if (within_tolerance) exit
 
   enddo
 
