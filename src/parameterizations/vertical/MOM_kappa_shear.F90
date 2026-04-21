@@ -18,7 +18,7 @@ use MOM_unit_scaling,      only : unit_scale_type
 use MOM_variables,         only : thermo_var_ptrs
 use MOM_verticalGrid,      only : verticalGrid_type
 use MOM_EOS,               only : calculate_density_derivs, calculate_density_derivs_dev
-use MOM_EOS,               only : calculate_density, calculate_specific_vol_derivs
+use MOM_EOS,               only : calculate_density, calculate_specific_vol_derivs, EOS_type
 
 implicit none ; private
 
@@ -170,6 +170,11 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     diag_S2_init, & ! Diagnostic of S2 as provided to this routine [T-2 ~> s-2]
     diag_N2_mean, & ! Diagnostic of N2 averaged over the timestep applied [T-2 ~> s-2]
     diag_S2_mean ! Diagnostic of S2 averaged over the timestep applied [T-2 ~> s-2]
+  
+  ! Local pointers for accessing thermodynamic variables on device
+  real, dimension(:,:,:), pointer :: T_ptr => NULL(), S_ptr => NULL()
+  type(EOS_type), pointer :: EOS_ptr => NULL()
+  
   real, dimension(SZK_(GV)) :: &
     h_1d, &             ! A 1-D column version of h [H ~> m or kg m-2].
     dz_1d, &            ! Vertical distance between interface heights [Z ~> m].
@@ -242,39 +247,50 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
   ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
-  ! TODO: HOW TO HANDLE PSURF since it's a pointer?
   !$omp target enter data map(alloc: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d)
+  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
+
+  !$omp target enter data map(to: p_surf) if (associated(p_surf))
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
-  ! Arrays that already have values that have to be pushed to devide
+  ! Associate local pointers with tv%T and tv%S to enable proper device mapping
+  ! This avoids the problem of accessing pointers through a derived type on device
+  if (use_temperature) then
+    T_ptr => tv%T
+    S_ptr => tv%S
+    EOS_ptr => tv%eqn_of_state
+  endif
+
+  ! Arrays that already have values that have to be pushed to device
   ! Note that tv%SpV_AvG is used in thickness_to_dz
-  ! TODO: how to hand tv%eqn_of_state pointer?
   ! TODO: Shoud kappa_io, tke_io, and kv_io be pushed to the device outside of this subroutine?
-  !$omp target enter data map(to: h, u_in, v_in, tv, tv%T, tv%S, tv%SpV_avg, tv%eqn_of_state, kv_io, &
-  !$omp &                     kappa_io, tke_io)
+  !$omp target enter data map(to: h, u_in, v_in, kappa_io, tke_io)
+  !$omp target enter data map(to: T_ptr, S_ptr) if(use_temperature)
 
   !$omp target teams distribute parallel do collapse(2)
   do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
     
     ! Convert layer thicknesses into geometric thickness in height units.
     ! This acccess GV%H_to_RZ, which isn't technically on the device, but its a scalar so maybe ok? 
-    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV, do_offload=.true.)
+    !call thickness_to_dz(h, tv, dz_1d, i, j, G, GV)
+    do k=1,nz
+        dz_1d(k) = GV%H_to_Z * h(i,j,k)
+    enddo
 
     do k=1,nz
       h_1d(k) = h(i,j,k)
       u_1d(k) = u_in(i,j,k) 
       v_1d(k) = v_in(i,j,k)
-      if (use_temperature) then 
-        T_1d(k) = tv%T(i,j,k)
-        S_1d(k) = tv%S(i,j,k)
-      else 
-        ! GV%RLay is already on the device
-        rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
-      endif
+        if (use_temperature) then 
+          T_1d(k) = T_ptr(i,j,k)
+          S_1d(k) = S_ptr(i,j,k)
+        else 
+          ! GV%RLay is already on the device
+          rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
+        endif
     enddo
 
     ! Store a transposed version of the initial arrays.
@@ -360,9 +376,9 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     enddo
 
     call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
-                            h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                            tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                            tv, CS, GV, US)
+                           h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
+                           tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+                           EOS_ptr, use_temperature, CS, GV, US)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
@@ -429,16 +445,27 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
  
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
 
-  !$omp target exit data map(from:  h, u_in, v_in, tv, tv%T, tv%S, tv%SpV_avg, tv%eqn_of_state, kv_io, &
-  !$omp &                     kappa_io, tke_io)
+  ! Copy back output arrays from device
+  !$omp target exit data map(from: kappa_io, tke_io)
+  
+  ! Delete input arrays from device (no need to copy back since they're input only)
+  !$omp target exit data map(delete: h, u_in, v_in)
+  !$omp target exit data map(delete: T_ptr, S_ptr) if(use_temperature)
 
-  !$omp target exit data map(delete:  h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
+  !$omp target exit data map(delete: p_surf) if (associated(p_surf))
+
+  !$omp target exit data map(delete: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d)
+  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
 
   !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
-  !$omp target exit data map(delete:  diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+
+  ! Clean up local pointer associations
+  if (use_temperature) then
+    nullify(T_ptr, S_ptr, EOS_ptr)
+  endif
 
   if (CS%debug) then
     call hchksum(diag_N2_init, "kappa_shear N2_init", G%HI, unscale=US%s_to_T**2)
@@ -746,7 +773,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
       call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                               h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv, CS, GV, US)
+                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv%eqn_of_state, &
+                              use_temperature, CS, GV, US)
     ! call cpu_clock_begin(Id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
       if (nz == nzc) then
@@ -910,7 +938,8 @@ end subroutine Calc_kappa_shear_vertex
 !> This subroutine calculates shear-driven diffusivity and TKE in a single column
 subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_lay, &
                               u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, tke_avg, N2_init, S2_init, &
-                              N2_mean, S2_mean, tv, CS, GV, US )
+                              N2_mean, S2_mean, EOS, use_temperature, CS, GV, US )
+  !$omp declare target
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure.
   real, dimension(SZK_(GV)+1), &
                      intent(inout) :: kappa !< The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
@@ -946,9 +975,9 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   real, dimension(SZK_(GV)+1), &
                      intent(out)   :: S2_init  !< The initial value of S2 [Z2 T-2 ~> m2 s-2].
   real,                    intent(in)    :: dt !< Time increment [T ~> s].
-  type(thermo_var_ptrs),   intent(in)    :: tv !< A structure containing pointers to any
-                                               !! available thermodynamic fields. Absent fields
-                                               !! have NULL ptrs.
+  type(EOS_type),          pointer       :: EOS !< Equation of state structure
+  logical,                 intent(in)    :: use_temperature !< If true, temperature and salinity are
+                                               !! being used as state variables.
   type(Kappa_shear_CS),    pointer       :: CS !< The control structure returned by a previous
                                                !! call to kappa_shear_init.
   type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
@@ -1037,8 +1066,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   real :: k0dt          ! The background diffusivity times the timestep [H Z ~> m2 or kg m-1].
   real :: I_lz_rescale_sqr ! The inverse of a rescaling factor for L2_bdry (Lz) squared [nondim].
   logical :: valid_dt   ! If true, all levels so far exhibit acceptably small changes in k_src.
-  logical :: use_temperature  !  If true, temperature and salinity have been
-                        ! allocated and are being used as state variables.
   integer :: ks_kappa, ke_kappa  ! The k-range with nonzero kappas.
   integer :: dt_refinements ! The number of 2-fold refinements that will be used
                            ! to estimate the maximum permitted time step.  I.e.,
@@ -1065,7 +1092,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   endif
   tol2 = 2.0*CS%kappa_tol_err
   dt_refinements = 5 ! Selected so that 1/2^dt_refinements < 1-tol_dksrc_low
-  use_temperature = .false. ; if (associated(tv%T)) use_temperature = .true.
 
 
   ! Set up Idz as the inverse of layer thicknesses.
@@ -1183,7 +1209,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     enddo
     if (GV%Boussinesq .or. GV%semi_Boussinesq) then
       call calculate_density_derivs_dev(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
-                                    tv%eqn_of_state, (/2,nzc/), scale=-g_R0 )
+                                    EOS, (/2,nzc/), scale=-g_R0 )
     else
       ! These should perhaps be combined into a single call to calculate the thermal expansion
       ! and haline contraction coefficients?
@@ -1253,10 +1279,10 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     ! Determine the range of non-zero values of kappa_out.
     ks_kappa = GV%ke+1 ; ke_kappa = 0
     do K=2,nzc ; if (kappa_out(K) > 0.0) then
-      ks_kappa = K ; exit
+      ks_kappa = K !; exit
     endif ; enddo
     do k=nzc,ks_kappa,-1 ; if (kappa_out(K) > 0.0) then
-      ke_kappa = K ; exit
+      ke_kappa = K !; exit
     endif ; enddo
     if (ke_kappa == nzc) kappa_out(nzc+1) = 0.0
   ! call cpu_clock_end(id_clock_avg)
@@ -1300,22 +1326,22 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
             if (CS%restrictive_tolerance_check) then
               if ((K_src(K) > min(tol_max(K), kappa_src(K) + Idtt*tol_chg(K))) .or. &
                   (K_src(K) < max(tol_min(K), kappa_src(K) - Idtt*tol_chg(K)))) then
-                valid_dt = .false. ; exit
+                valid_dt = .false. !; exit
               endif
             else
               if ((K_src(K) > max(tol_max(K), kappa_src(K) + Idtt*tol_chg(K))) .or. &
                   (K_src(K) < min(tol_min(K), kappa_src(K) - Idtt*tol_chg(K)))) then
-                valid_dt = .false. ; exit
+                valid_dt = .false. !; exit
               endif
             endif
           else
             if (0.0 < min(tol_min(K), kappa_src(K) - Idtt*tol_chg(K))) then
-              valid_dt = .false. ; k_src(K) = 0.0 ; exit
+              valid_dt = .false. !; k_src(K) = 0.0 ; exit
             endif
           endif
         enddo
 
-        if (valid_dt) exit
+        ! if (valid_dt) exit
         dt_test = 0.5*dt_test
       enddo
       ! UMW +AI description: If the halving loop found an acceptable time-step, then refine 
@@ -1433,7 +1459,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     ! call cpu_clock_end(id_clock_project)
     endif
 
-    if (dt_rem <= 0.0) exit
+    ! if (dt_rem <= 0.0) exit
 
   enddo ! end itt loop
 
@@ -1828,10 +1854,10 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
           do K=ke_tke+1,nz+1
             dQ(K) = e1(K)*dQ(K-1)
             tke(K) = max(tke(K) + dQ(K), TKE_min)
-            if (abs(dQ(K)) < roundoff*tke(K)) exit
+            !if (abs(dQ(K)) < roundoff*tke(K)) exit
           enddo
           do K2=K+1,nz
-            if (dQ(K2) == 0.0) exit
+            !if (dQ(K2) == 0.0) exit
             dQ(K2) = 0.0
           enddo
         endif
@@ -1865,7 +1891,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Neglect values that are smaller than kappa_trunc.
         if (kappa(K) < cKcomp*kappa_trunc) then
           kappa(K) = 0.0
-          if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
+          !if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
         elseif (kappa(K) < 2.0*cKcomp*kappa_trunc) then
           kappa(K) = 2.0 * (kappa(K) - cKcomp*kappa_trunc)
         endif
@@ -1880,7 +1906,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Neglect values that are smaller than kappa_trunc.
         if (kappa(K) <= kappa_trunc) then
           kappa(K) = 0.0
-          if (K < ks_src) then ; ks_kappa = k+1 ; K_Q(K) = 0.0 ; exit ; endif
+          !if (K < ks_src) then ; ks_kappa = k+1 ; K_Q(K) = 0.0 ; exit ; endif
         elseif (kappa(K) < 2.0*kappa_trunc) then
           kappa(K) = 2.0 * (kappa(K) - kappa_trunc)
         endif
@@ -1920,7 +1946,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Ensure that the pivot is always positive, and that 0 <= cK <= 1.
         ! Otherwise do not use Newton's method.
         decay_term_k = -Idz(k-1)*dQmdK(K)*dKdQ(K-1) + h_Int(K)*I_Ld2(K)
-        if (decay_term_k < 0.0) then ; abort_Newton = .true. ; exit ; endif
+        !if (decay_term_k < 0.0) then ; abort_Newton = .true. ; exit ; endif
         bK = 1.0 / (Idz(k) + Idz(k-1)*cKcomp + decay_term_k)
 
         cK(K+1) = bK * Idz(k)
@@ -1955,7 +1981,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Ensure that the pivot is always positive, and that 0 <= cQ <= 1.
         ! Otherwise do not use Newton's method.
         decay_term_Q = h_Int(K)*TKE_decay(K) - dQdz(k-1)*dKdQ(K-1)*cQ(K) - v2*dKdQ(K)
-        if (decay_term_Q < 0.0) then ; abort_Newton = .true. ; exit ; endif
+        !if (decay_term_Q < 0.0) then ; abort_Newton = .true. ; exit ; endif
         bQ = 1.0 / (aQ(k) + (cQcomp*aQ(k-1) + decay_term_Q))
 
         cQ(K+1) = aQ(k) * bQ
@@ -1970,7 +1996,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         if ((itt > 1) .and. (K > ke_src) .and. (dK(K) == 0.0) .and. &
             ((kappa(K) + kappa(K+1)) == 0.0)) then
         ! Could also do  .and. (bQ*abs(tke_src) < roundoff*TKE(K)) then
-          ke_kappa = k-1 ; exit
+          ke_kappa = k-1 !; exit
         endif
       enddo
       if ((ke_kappa == nz) .and. (.not. abort_Newton)) then
@@ -2009,7 +2035,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Ensure that TKE+dQ will not drop below 0.5*TKE.
           dQ(K) = max(e1(K)*dQ(K-1),-0.5*TKE(K))
           TKE(K) = max(TKE(K) + dQ(K), TKE_min)
-          if (abs(dQ(K)) < roundoff*TKE(K)) exit
+          !if (abs(dQ(K)) < roundoff*TKE(K)) exit
         enddo
         if (debug_soln) then ; do K2=K+1,nz+1 ; dQ(K2) = 0.0 ; dK(K2) = 0.0 ; enddo ; endif
       endif
@@ -2078,13 +2104,13 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         kappa_mean = kappa0 + (kappa(K) - 0.5*dK(K))
         if (abs(dK(K)) > Newton_test * kappa_mean) then
           if (do_Newton) abort_Newton = .true.
-          within_tolerance = .false. ; do_Newton = .false. ; exit
+          within_tolerance = .false. ; do_Newton = .false. !; exit
         elseif (abs(dK(K)) > tol_err * kappa_mean) then
-          within_tolerance = .false. ; if (.not.do_Newton) exit
+          within_tolerance = .false. ; !if (.not.do_Newton) exit
         endif
         if (abs(dQ(K)) > Newton_test*(tke(K) - 0.5*dQ(K))) then
           if (do_Newton) abort_Newton = .true.
-          do_Newton = .false. ; if (.not.within_tolerance) exit
+          do_Newton = .false. ; !if (.not.within_tolerance) exit
         endif
       enddo
 
@@ -2092,7 +2118,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
       within_tolerance = .true.
       do K=min(ks_kappa,ks_kappa_prev),max(ke_kappa,ke_kappa_prev)
         if (abs(dK(K)) > tol_err * (kappa0 + (kappa(K) - 0.5*dK(K)))) then
-          within_tolerance = .false. ;  exit
+          within_tolerance = .false. !;  exit
         endif
       enddo
     endif
@@ -2105,7 +2131,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
       do K=2,nz ; K_Q(K) = kappa(K) / max(TKE(K), TKE_min) ; enddo
     endif
 
-    if (within_tolerance) exit
+    !if (within_tolerance) exit
 
   enddo
 
@@ -2397,7 +2423,7 @@ function kappa_shear_init(Time, G, GV, US, param_file, diag, CS)
          's-2', conversion=US%s_to_T**2)
   endif
 
-  !$omp target enter data map(to: CS)
+  ! !$omp target enter data map(to: CS)
 
 end function kappa_shear_init
 

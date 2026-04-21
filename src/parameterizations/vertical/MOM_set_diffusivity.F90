@@ -2712,7 +2712,7 @@ subroutine set_diffusivity_end(CS)
   endif
 
   ! NOTE: CS%kappaShear_CSp is always allocated, even if unused
-  !$omp target exit data map(delete: CS%kappaShear_CSp)
+  ! !$omp target exit data map(delete: CS%kappaShear_CSp)
   deallocate(CS%kappaShear_CSp)
 end subroutine set_diffusivity_end
 
