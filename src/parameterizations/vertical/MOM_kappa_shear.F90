@@ -236,12 +236,14 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   ! Unused diagnostics to allocated to avoid large transfers to and from the device. 
   !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+
   ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
   ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
   !$omp target enter data map(alloc: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
   !$omp target enter data map(to: p_surf) if (associated(p_surf))
+  
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
@@ -250,7 +252,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp target enter data map(to: h, u_in, v_in, kappa_io, tke_io)
   ! It's ok to map tv pointers TO the device - mapping them back leads to accelerator failures
   ! Note that tv%SpV_AvG is used in thickness_to_dz
-  !$omp target enter data map(to: tv%T, tv%S, tv%eqn_of_state) if(use_temperature)
+  !$omp target enter data map(to: tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg) if(use_temperature)
 
   !$omp target teams distribute parallel do collapse(2) private(h_1d, u_1d, v_1d, T_1d, S_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
@@ -260,11 +262,8 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     
     ! Convert layer thicknesses into geometric thickness in height units.
     ! This acccess GV%H_to_RZ, which isn't technically on the device, but its a scalar so maybe ok? 
-    !call thickness_to_dz(h, tv, dz_1d, i, j, G, GV)
-    do k=1,nz
-        dz_1d(k) = GV%H_to_Z * h(i,j,k)
-    enddo
-
+    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV)
+    
     do k=1,nz
       h_1d(k) = h(i,j,k)
       u_1d(k) = u_in(i,j,k) 
@@ -435,7 +434,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   
   ! Delete input arrays from device (no need to copy back since they're input only)
   !$omp target exit data map(release: h, u_in, v_in)
-  !$omp target exit data map(release: tv%T, tv%S, tv%eqn_of_state) if(use_temperature)
+  !$omp target exit data map(release: tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg) if(use_temperature)
   !$omp target exit data map(release: p_surf) if (associated(p_surf))
 
   ! These are all locals and can be safely deleted
