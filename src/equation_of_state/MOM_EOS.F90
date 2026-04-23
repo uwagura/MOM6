@@ -10,7 +10,8 @@ use MOM_EOS_linear, only : linear_EOS, avg_spec_vol_linear
 use MOM_EOS_linear, only : int_density_dz_linear, int_spec_vol_dp_linear
 use MOM_EOS_Wright, only : buggy_Wright_EOS, avg_spec_vol_buggy_Wright
 use MOM_EOS_Wright, only : int_density_dz_wright, int_spec_vol_dp_wright
-use MOM_EOS_Wright, only : calculate_density_derivs_elem_buggy_Wright_loc
+! UMW: Added this to get density_derivs_working_on_device
+use MOM_EOS_Wright, only : calculate_density_derivs_elem_buggy_Wright
 use MOM_EOS_Wright_full, only : Wright_full_EOS, avg_spec_vol_Wright_full
 use MOM_EOS_Wright_full, only : int_density_dz_wright_full, int_spec_vol_dp_wright_full
 use MOM_EOS_Wright_red,  only : Wright_red_EOS, avg_spec_vol_Wright_red
@@ -1033,6 +1034,8 @@ subroutine calculate_density_derivs_dev(T, S, pressure, drho_dT, drho_dS, EOS, d
   dRdT_scale = rho_scale * EOS%C_to_degC
   dRdS_scale = rho_scale * EOS%S_to_ppt
 
+  ! Select case on the form of EOS to call the appropriate function directly, avoiding polymorphic 
+  ! calls which are not supported on GPU. If the EOS is not recognized, set derivatives to 0
   select case (EOS%form_of_EOS)
     case (EOS_WRIGHT)
       do i=is,ie
@@ -1040,8 +1043,7 @@ subroutine calculate_density_derivs_dev(T, S, pressure, drho_dT, drho_dS, EOS, d
         pres_i = EOS%RL2_T2_to_Pa * pressure(i)
         T_i = EOS%C_to_degC * T(i)
         S_i = EOS%S_to_ppt * S(i)
-        ! Call the GPU-compatible _loc function directly
-        call calculate_density_derivs_elem_buggy_Wright_loc(T_i, S_i, pres_i, dRdT_i, dRdS_i)
+        call calculate_density_derivs_elem_buggy_Wright(EOS%type, T_i, S_i, pres_i, dRdT_i, dRdS_i)
         ! Apply scaling
         drho_dT(i) = dRdT_scale * dRdT_i
         drho_dS(i) = dRdS_scale * dRdS_i

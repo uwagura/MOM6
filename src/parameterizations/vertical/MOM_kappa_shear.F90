@@ -171,10 +171,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     diag_N2_mean, & ! Diagnostic of N2 averaged over the timestep applied [T-2 ~> s-2]
     diag_S2_mean ! Diagnostic of S2 averaged over the timestep applied [T-2 ~> s-2]
   
-  ! Local pointers for accessing thermodynamic variables on device
-  real, dimension(:,:,:), pointer :: T_ptr => NULL(), S_ptr => NULL()
-  type(EOS_type), pointer :: EOS_ptr => NULL()
-  
   real, dimension(SZK_(GV)) :: &
     h_1d, &             ! A 1-D column version of h [H ~> m or kg m-2].
     dz_1d, &            ! Vertical distance between interface heights [Z ~> m].
@@ -240,31 +236,21 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   ! Unused diagnostics to allocated to avoid large transfers to and from the device. 
   !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
-
   ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
   ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
   !$omp target enter data map(alloc: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
-
   !$omp target enter data map(to: p_surf) if (associated(p_surf))
-
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
-  ! Associate local pointers with tv%T and tv%S to enable proper device mapping
-  ! This avoids the problem of accessing pointers through a derived type on device
-  if (use_temperature) then
-    T_ptr => tv%T
-    S_ptr => tv%S
-    EOS_ptr => tv%eqn_of_state
-  endif
-
   ! Arrays that already have values that have to be pushed to device
-  ! Note that tv%SpV_AvG is used in thickness_to_dz
   ! TODO: Shoud kappa_io, tke_io, and kv_io be pushed to the device outside of this subroutine?
   !$omp target enter data map(to: h, u_in, v_in, kappa_io, tke_io)
-  !$omp target enter data map(to: T_ptr, S_ptr) if(use_temperature)
+  ! It's ok to map tv pointers TO the device - mapping them back leads to accelerator failures
+  ! Note that tv%SpV_AvG is used in thickness_to_dz
+  !$omp target enter data map(to: tv%T, tv%S, tv%eqn_of_state) if(use_temperature)
 
   !$omp target teams distribute parallel do collapse(2) private(h_1d, u_1d, v_1d, T_1d, S_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
@@ -284,8 +270,8 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       u_1d(k) = u_in(i,j,k) 
       v_1d(k) = v_in(i,j,k)
         if (use_temperature) then 
-          T_1d(k) = T_ptr(i,j,k)
-          S_1d(k) = S_ptr(i,j,k)
+          T_1d(k) = tv%T(i,j,k)
+          S_1d(k) = tv%S(i,j,k)
         else 
           ! GV%RLay is already on the device
           rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
@@ -377,7 +363,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                            h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
                            tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                           EOS_ptr, use_temperature, CS, GV, US)
+                           tv%eqn_of_state, use_temperature, CS, GV, US)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
@@ -448,23 +434,16 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp target exit data map(from: kappa_io, tke_io)
   
   ! Delete input arrays from device (no need to copy back since they're input only)
-  !$omp target exit data map(delete: h, u_in, v_in)
-  !$omp target exit data map(delete: T_ptr, S_ptr) if(use_temperature)
+  !$omp target exit data map(release: h, u_in, v_in)
+  !$omp target exit data map(release: tv%T, tv%S, tv%eqn_of_state) if(use_temperature)
+  !$omp target exit data map(release: p_surf) if (associated(p_surf))
 
-  !$omp target exit data map(delete: p_surf) if (associated(p_surf))
-
+  ! These are all locals and can be safely deleted
   !$omp target exit data map(delete: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
-
   !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
-
   !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
-
-  ! Clean up local pointer associations
-  if (use_temperature) then
-    nullify(T_ptr, S_ptr, EOS_ptr)
-  endif
 
   if (CS%debug) then
     call hchksum(diag_N2_init, "kappa_shear N2_init", G%HI, unscale=US%s_to_T**2)
