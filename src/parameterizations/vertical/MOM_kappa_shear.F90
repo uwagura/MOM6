@@ -243,7 +243,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
   !$omp target enter data map(to: p_surf) if (associated(p_surf))
-  
+
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
@@ -362,7 +362,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                            h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
                            tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                           tv%eqn_of_state, use_temperature, CS, GV, US)
+                           tv, CS, GV, US)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
@@ -750,8 +750,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
       call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                               h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv%eqn_of_state, &
-                              use_temperature, CS, GV, US)
+                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv, &
+                              CS, GV, US)
     ! call cpu_clock_begin(Id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
       if (nz == nzc) then
@@ -915,7 +915,7 @@ end subroutine Calc_kappa_shear_vertex
 !> This subroutine calculates shear-driven diffusivity and TKE in a single column
 subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_lay, &
                               u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, tke_avg, N2_init, S2_init, &
-                              N2_mean, S2_mean, EOS, use_temperature, CS, GV, US )
+                              N2_mean, S2_mean, tv, CS, GV, US )
   !$omp declare target
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure.
   real, dimension(SZK_(GV)+1), &
@@ -952,9 +952,9 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   real, dimension(SZK_(GV)+1), &
                      intent(out)   :: S2_init  !< The initial value of S2 [Z2 T-2 ~> m2 s-2].
   real,                    intent(in)    :: dt !< Time increment [T ~> s].
-  type(EOS_type),          pointer       :: EOS !< Equation of state structure
-  logical,                 intent(in)    :: use_temperature !< If true, temperature and salinity are
-                                               !! being used as state variables.
+  type(thermo_var_ptrs),   intent(in)    :: tv !< A structure containing pointers to any
+                                               !! available thermodynamic fields. Absent fields
+                                               !! have NULL ptrs.
   type(Kappa_shear_CS),    pointer       :: CS !< The control structure returned by a previous
                                                !! call to kappa_shear_init.
   type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
@@ -1043,6 +1043,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   real :: k0dt          ! The background diffusivity times the timestep [H Z ~> m2 or kg m-1].
   real :: I_lz_rescale_sqr ! The inverse of a rescaling factor for L2_bdry (Lz) squared [nondim].
   logical :: valid_dt   ! If true, all levels so far exhibit acceptably small changes in k_src.
+  logical :: use_temperature  !  If true, temperature and salinity have been
+                        ! allocated and are being used as state variables.
   integer :: ks_kappa, ke_kappa  ! The k-range with nonzero kappas.
   integer :: dt_refinements ! The number of 2-fold refinements that will be used
                            ! to estimate the maximum permitted time step.  I.e.,
@@ -1069,6 +1071,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   endif
   tol2 = 2.0*CS%kappa_tol_err
   dt_refinements = 5 ! Selected so that 1/2^dt_refinements < 1-tol_dksrc_low
+  use_temperature = .false. ; if (associated(tv%T)) use_temperature = .true.
 
 
   ! Set up Idz as the inverse of layer thicknesses.
@@ -1186,7 +1189,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     enddo
     if (GV%Boussinesq .or. GV%semi_Boussinesq) then
       call calculate_density_derivs_dev(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
-                                    EOS, (/2,nzc/), scale=-g_R0 )
+                                    tv%eqn_of_state, (/2,nzc/), scale=-g_R0 )
     else
       ! These should perhaps be combined into a single call to calculate the thermal expansion
       ! and haline contraction coefficients?
