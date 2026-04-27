@@ -242,17 +242,9 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp target enter data map(alloc: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
-  !$omp target enter data map(to: p_surf) if (associated(p_surf))
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
-
-  ! Arrays that already have values that have to be pushed to device
-  ! TODO: Shoud kappa_io, tke_io, and kv_io be pushed to the device outside of this subroutine?
-  !$omp target enter data map(to: h, u_in, v_in, kappa_io, tke_io)
-  ! It's ok to map tv pointers TO the device - mapping them back leads to accelerator failures
-  ! Note that tv%SpV_AvG is used in thickness_to_dz
-  !$omp target enter data map(to: tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg) if(use_temperature)
 
   !$omp target teams distribute parallel do collapse(2) private(h_1d, u_1d, v_1d, T_1d, S_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
@@ -428,16 +420,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     enddo
  
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
-
-  ! Copy back output arrays from device
-  !$omp target exit data map(from: kappa_io, tke_io)
   
-  ! Delete input arrays from device (no need to copy back since they're input only)
-  !$omp target exit data map(release: h, u_in, v_in)
-  !$omp target exit data map(release: tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg) if(use_temperature)
-  !$omp target exit data map(release: p_surf) if (associated(p_surf))
-
-  ! These are all locals and can be safely deleted
   !$omp target exit data map(delete: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
   !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)

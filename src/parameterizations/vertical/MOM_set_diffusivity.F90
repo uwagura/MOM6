@@ -429,8 +429,16 @@ subroutine set_diffusivity(u, v, h, u_h, v_h, tv, fluxes, optics, visc, dt, Kd_i
       endif
     else
       ! Changes: visc%Kd_shear ;  Sets: visc%Kv_shear and visc%TKE_turb
+      ! It's ok to map tv pointers TO the device - mapping them back leads to accelerator failures
+      ! Note that tv%SpV_AvG is used in thickness_to_dz
+      !$omp target enter data map(to: u_h, v_h, h, tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg, &
+      !$omp & fluxes%p_surf)
+      !$omp target enter data map(alloc: visc%Kd_shear, visc%Kv_shear, visc%TKE_turb)
       call calculate_kappa_shear(u_h, v_h, h, tv, fluxes%p_surf, visc%Kd_shear, visc%TKE_turb, &
                                  visc%Kv_shear, dt, G, GV, US, CS%kappaShear_CSp)
+      !$omp target exit data map(from: visc%Kd_shear, visc%Kv_shear, visc%TKE_turb)
+      !$omp target exit data map(release: u_h, v_h, h, tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg, &
+      !$omp & fluxes%p_surf)
       if (CS%debug) then
         call hchksum(visc%Kd_shear, "after calc_KS visc%Kd_shear", G%HI, unscale=GV%HZ_T_to_m2_s)
         call hchksum(visc%Kv_shear, "after calc_KS visc%Kv_shear", G%HI, unscale=GV%HZ_T_to_m2_s)
