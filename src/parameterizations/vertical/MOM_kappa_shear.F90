@@ -1063,9 +1063,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   ! adjacent layer centers.
   I_dz_int(1) = 2.0 / dz_lay(1)
   dist_from_top(1) = 0.0 ; h_from_top(1) = 0.0
-  ! UMW + AI: The distance between layer centers is the average of the thicknesses of the two layers, 
-  ! so the inverse is 2 divided by the sum of the thicknesses.
-  ! Add up distances and thicknessess from the top as well 
   do K=2,nzc
     I_dz_int(K) = 2.0 / (dz_lay(k-1) + dz_lay(k))
     dist_from_top(K) = dist_from_top(K-1) + dz_lay(k-1)
@@ -1087,8 +1084,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 
   !   Determine the velocities and thicknesses after eliminating massless
   ! layers and applying a time-step of background diffusion.
-  ! UMW description: Update U,V,T,S within column using background diffusivity
-  ! (kappa_0) alone. 
   if (nzc > 1) then
     a1(2) = k0dt*I_dz_int(2)
     b1 = 1.0 / (hlay(1) + a1(2))
@@ -1264,11 +1259,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         tol_chg(K) = tol2 * local_src_avg(K)
       enddo
 
-      ! UMW + AI description: Find timestep that changes kappa_src within
-      ! Preset tolerances.  This is done by halving the timestep until the changes are
-      ! acceptable, and then refining the estimate by testing additional timesteps between
-      ! the last acceptable and first unacceptable timesteps.  The halving is done in a
-      ! loop that is allowed to run up to (max_KS_it+1-itt)/2 times. 
       do itt_dt=1,(CS%max_KS_it+1-itt)/2
         !   The maximum number of times that the time-step is halved in
         ! seeking an acceptable timestep is reduced with each iteration,
@@ -1307,11 +1297,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         if (valid_dt) exit
         dt_test = 0.5*dt_test
       enddo
-      ! UMW +AI description: If the halving loop found an acceptable time-step, then refine 
-      ! the estimate by testing additional time-steps between the last acceptable and first 
-      ! unacceptable time-steps.  This is done by halving the increment to the time-step 
-      ! that is being tested until either the maximum number of refinements is reached or the 
-      ! time-step being tested is no longer less than the remaining time.
       if ((dt_test < dt_rem) .and. valid_dt) then
         dt_inc = 0.5*dt_test
         do itt_dt=1,dt_refinements
@@ -1350,11 +1335,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   ! call cpu_clock_end(id_clock_project)
 
     ! The state has already been projected forward. Now find new values of kappa.
-
-    ! UMW + AI : use updated value of dt_now to recalcualte
-    ! kappa_out, and then find the average value of kappa over the time step, and
-    ! the average value of TKE over the time step.  If there is no mixing
-    ! (ke_kappa < ks_kappa)
 
 
     if (ke_kappa < ks_kappa) then
