@@ -169,17 +169,19 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     diag_N2_init, & ! Diagnostic of N2 as provided to this routine [T-2 ~> s-2]
     diag_S2_init, & ! Diagnostic of S2 as provided to this routine [T-2 ~> s-2]
     diag_N2_mean, & ! Diagnostic of N2 averaged over the timestep applied [T-2 ~> s-2]
-    diag_S2_mean ! Diagnostic of S2 averaged over the timestep applied [T-2 ~> s-2]
+    diag_S2_mean, & ! Diagnostic of S2 averaged over the timestep applied [T-2 ~> s-2]
+    kappa, &        ! The shear-driven diapycnal diffusivity at an interface [H Z T-1 ~> m2 s-1 or Pa s]
+    tke, &          ! The Turbulent Kinetic Energy per unit mass at an interface [Z2 T-2 ~> m2 s-2].
+    kappa_avg, &    ! The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
+    tke_avg, &      ! The time-weighted average of TKE [Z2 T-2 ~> m2 s-2]
+    kc, &           ! The index map between the original
+                    ! interfaces and the interfaces with massless layers
+                    ! merged into nearby massive layers.
+    kf              ! The fractional weight of interface kc+1 for
+                    ! interpolating back to the original index space [nondim].
   
-  real, dimension(SZK_(GV)) :: &
-    h_1d, &             ! A 1-D column version of h [H ~> m or kg m-2].
-    dz_1d, &            ! Vertical distance between interface heights [Z ~> m].
-    u_1d, v_1d, &       ! 1-D column versions of u_in and v_in, converted to [L T-1 ~> m s-1].
-    T_1d, S_1d, rho_1d  ! 1-D column versions of T [C ~> degC], S [S ~> ppt], and rho [R ~> kg m-3].
-  real, dimension(SZK_(GV)+1) :: &
-    kappa_1d, & ! 1-D column version of kappa_io [H Z T-1 ~> m2 s-1 or Pa s]
-    tke_1d      ! 1-D column version tke_io [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZK_(GV)) :: &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
+    dz_3d, &    ! Vertical distance between interface heights [Z ~> m].
     Idz, &      ! The inverse of the thickness of the merged layers [H-1 ~> m2 kg-1].
     h_lay, &    ! The layer thickness [H ~> m or kg m-2]
     dz_lay, &   ! The geometric layer thickness in height units [Z ~> m]
@@ -188,15 +190,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     T0xdz, &    ! The initial temperature times thickness [C H ~> degC m or degC kg m-2] or if
                 ! temperature is not a state variable, the density times thickness [R H ~> kg m-2 or kg2 m-5]
     S0xdz       ! The initial salinity times dz [S H ~> ppt m or ppt kg m-2].
-  real, dimension(SZK_(GV)+1) :: &
-    kappa, &    ! The shear-driven diapycnal diffusivity at an interface [H Z T-1 ~> m2 s-1 or Pa s]
-    tke, &      ! The Turbulent Kinetic Energy per unit mass at an interface [Z2 T-2 ~> m2 s-2].
-    kappa_avg, & ! The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
-    tke_avg, &  ! The time-weighted average of TKE [Z2 T-2 ~> m2 s-2].
-    N2_init, &  ! N2 as provided to this routine [T-2 ~> s-2].
-    S2_init, &  ! S2 as provided to this routine [T-2 ~> s-2].
-    N2_mean, &  ! The time-weighted average of N2 [T-2 ~> s-2].
-    S2_mean     ! The time-weighted average of S2 [T-2 ~> s-2].
 
   real :: f2    ! The squared Coriolis parameter of each column [T-2 ~> s-2].
   real :: surface_pres  ! The top surface pressure [R L2 T-2 ~> Pa].
@@ -206,12 +199,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   real :: dz_massless   ! A layer thickness that is considered massless [H ~> m or kg m-2]
   logical :: use_temperature  !  If true, temperature and salinity have been
                         ! allocated and are being used as state variables.
-
-  integer, dimension(SZK_(GV)+1) :: kc ! The index map between the original
-                        ! interfaces and the interfaces with massless layers
-                        ! merged into nearby massive layers.
-  real, dimension(SZK_(GV)+1) :: kf ! The fractional weight of interface kc+1 for
-                        ! interpolating back to the original index space [nondim].
   integer :: is, ie, js, je, i, j, k, nz, nzc
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
@@ -239,32 +226,18 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
   ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
-  !$omp target enter data map(alloc: h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
+  !$omp target enter data map(alloc: h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp &                 kf, kc, kappa, Idz)
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
-  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
+  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg)
 
-  !$omp target teams distribute parallel do collapse(2) private(h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz, tke_avg, kappa_avg, &
-  !$omp &                 N2_init, S2_init, N2_mean, S2_mean, tke)
+  ! Calculate thicknesses outside of main kernel
+  ! Convert layer thicknesses into geometric thickness in height units.
+  call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload = .true. ) 
+
+  !$omp target teams distribute parallel do collapse(2) private(nzc, f2, i, j, surface_pres, dz_in_lay)  
   do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
-    
-    ! Convert layer thicknesses into geometric thickness in height units.
-    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV) 
-    
-    ! do k=1,nz
-    !   ! h_1d(k) = h(i,j,k)
-    !   ! u_1d(k) = u_in(i,j,k) 
-    !   ! v_1d(k) = v_in(i,j,k)
-    !     if (use_temperature) then 
-    !       T_1d(k) = tv%T(i,j,k)
-    !       S_1d(k) = tv%S(i,j,k)
-    !     else 
-    !       ! GV%RLay is already on the device
-    !       rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
-    !     endif
-    ! enddo
 
     ! Store a transposed version of the initial arrays.
     ! Any elimination of massless layers would occur here.
@@ -274,67 +247,63 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       ! various variables in those layers.
       do k=1,nz
         ! Zero out the thicknesses of all layers, even if they are unused.
-        h_lay(k) = 0.0 ; dz_lay(k) = 0.0 ; u0xdz(k) = 0.0 ; v0xdz(k) = 0.0
-        T0xdz(k) = 0.0 ; S0xdz(k) = 0.0
+        h_lay(i,j,k) = 0.0 ; dz_lay(i,j,k) = 0.0 ; u0xdz(i,j,k) = 0.0 ; v0xdz(i,j,k) = 0.0
+        T0xdz(i,j,k) = 0.0 ; S0xdz(i,j,k) = 0.0
 
         ! Add a new layer if this one has mass.
 !          if ((h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless)) nzc = nzc+1
-        if ((k>CS%nkml) .and. (h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless)) then 
+        if ((k>CS%nkml) .and. (h_lay(i,j,nzc) > 0.0) .and. (h(i,j,k) > dz_massless)) then 
           nzc = nzc+1
         endif
 
-        ! Only merge clusters of massless layers.
-!         if ((h_lay(nzc) > dz_massless) .or. &
-!             ((h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless))) nzc = nzc+1
-
-        kc(k) = nzc
-        h_lay(nzc) = h_lay(nzc) + h(i,j,k)
-        dz_lay(nzc) = dz_lay(nzc) + dz_1d(k)
-        u0xdz(nzc) = u0xdz(nzc) + u_in(i,j,k)*h(i,j,k)
-        v0xdz(nzc) = v0xdz(nzc) + v_in(i,j,k)*h(i,j,k)
+        kc(i,j,k) = nzc
+        h_lay(i,j,nzc) = h_lay(i,j,nzc) + h(i,j,k)
+        dz_lay(i,j,nzc) = dz_lay(i,j,nzc) + dz_3d(i,j,k)
+        u0xdz(i,j,nzc) = u0xdz(i,j,nzc) + u_in(i,j,k)*h(i,j,k)
+        v0xdz(i,j,nzc) = v0xdz(i,j,nzc) + v_in(i,j,k)*h(i,j,k)
         if (use_temperature) then
-          T0xdz(nzc) = T0xdz(nzc) + tv%T(i,j,k)*h(i,j,k)
-          S0xdz(nzc) = S0xdz(nzc) + tv%S(i,j,k)*h(i,j,k)
+          T0xdz(i,j,nzc) = T0xdz(i,j,nzc) + tv%T(i,j,k)*h(i,j,k)
+          S0xdz(i,j,nzc) = S0xdz(i,j,nzc) + tv%S(i,j,k)*h(i,j,k)
         else
-          T0xdz(nzc) = T0xdz(nzc) + GV%Rlay(k)*h(i,j,k)
-          S0xdz(nzc) = S0xdz(nzc) + GV%Rlay(k)*h(i,j,k)
+          T0xdz(i,j,nzc) = T0xdz(i,j,nzc) + GV%Rlay(k)*h(i,j,k)
+          S0xdz(i,j,nzc) = S0xdz(i,j,nzc) + GV%Rlay(k)*h(i,j,k)
         endif
       enddo
-      kc(nz+1) = nzc+1
+      kc(i,j,nz+1) = nzc+1
 
       ! Set up Idz as the inverse of layer thicknesses.
-      do k=1,nzc ; Idz(k) = 1.0 / h_lay(k) ; enddo
+      do k=1,nzc ; Idz(i,j,k) = 1.0 / h_lay(i,j,k) ; enddo
 
       !   Now determine kf, the fractional weight of interface kc when
       ! interpolating between interfaces kc and kc+1.
-      kf(1) = 0.0 ; dz_in_lay = h_1d(1)
+      kf(i,j,1) = 0.0 ; dz_in_lay = h(i,j,1)
       do k=2,nz
-        if (kc(k) > kc(k-1)) then
-          kf(k) = 0.0 
-          dz_in_lay = h_1d(k)
+        if (kc(i,j,k) > kc(i,j,k-1)) then
+          kf(i,j,k) = 0.0 
+          dz_in_lay = h(i,j,k)
         else
-          kf(k) = dz_in_lay*Idz(kc(k))
-            dz_in_lay = dz_in_lay + h_1d(k)
+          kf(i,j,k) = dz_in_lay*Idz(i,j,kc(i,j,k))
+          dz_in_lay = dz_in_lay + h(i,j,k)
         endif
       enddo
-      kf(nz+1) = 0.0
+      kf(i,j,nz+1) = 0.0
     else
       do k=1,nz
-        h_lay(k) = h_1d(k)
-        dz_lay(k) = dz_1d(k)
-        u0xdz(k) = u_1d(k)*h_lay(k) ; v0xdz(k) = v_1d(k)*h_lay(k)
+        h_lay(i,j,k) = h(i,j,k)
+        dz_lay(i,j,k) = dz_3d(i,j,k)
+        u0xdz(i,j,k) = u_in(i,j,k)*h_lay(i,j,k) ; v0xdz(i,j,k) = v_in(i,j,k)*h_lay(i,j,k)
       enddo
       if (use_temperature) then
         do k=1,nz
-          T0xdz(k) = T_1d(k)*h_lay(k) ; S0xdz(k) = S_1d(k)*h_lay(k)
+          T0xdz(i,j,k) = tv%T(i,j,k)*h_lay(i,j,k) ; S0xdz(i,j,k) = tv%S(i,j,k)*h_lay(i,j,k)
         enddo
       else
         do k=1,nz
-          T0xdz(k) = rho_1d(k)*h_lay(k) ; S0xdz(k) = rho_1d(k)*h_lay(k)
+          T0xdz(i,j,k) = GV%Rlay(k)*h_lay(i,j,k) ; S0xdz(i,j,k) = GV%Rlay(k)*h_lay(i,j,k)
         enddo
       endif
       nzc = nz
-      do k=1,nzc+1 ; kc(k) = k ; kf(k) = 0.0 ; enddo
+      do k=1,nzc+1 ; kc(i,j,k) = k ; kf(i,j,k) = 0.0 ; enddo
     endif
     f2 = 0.25 * ((G%Coriolis2Bu(I,J) + G%Coriolis2Bu(I-1,J-1)) + &
                   (G%Coriolis2Bu(I,J-1) + G%Coriolis2Bu(I-1,J)))
@@ -345,82 +314,44 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     ! Set the initial guess for kappa, here defined at interfaces.
     ! ----------------------------------------------------
     do K=1,nzc+1
-      kappa(K) = CS%kappa_seed
+      kappa(i,j,K) = CS%kappa_seed
     enddo
 
     call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                            h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                           tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                           tv, CS, GV, US)
+                           tke_avg, diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
+                           tv, CS, G, GV, US, i ,j)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
     if (nz == nzc) then
-      ! kappa_avg -> kappa_1d and tke_avg -> tke_1d. Columnar values just become 1d fields.
       do K=1,nz+1
-        kappa_1d(K) = kappa_avg(K)
+        kappa_io(i,j,K) = kappa_avg(i,j,K)
         if (CS%all_layer_TKE_bug) then
-          tke_1d(K) = tke(K)
+          tke_io(i,j,K) = tke(i,j,K)
         else
-          tke_1d(K) = tke_avg(K)
+          tke_io(i,j,K) = tke_avg(i,j,K)
         endif
       enddo
-      ! Diagnostics
-      if (CS%id_N2_mean>0) then ; do K=1,nz+1
-        diag_N2_mean(i,j,K) = N2_mean(K)
-      enddo ; endif
-      if (CS%id_S2_mean>0) then ; do K=1,nz+1
-        diag_S2_mean(i,j,K) = S2_mean(K)
-      enddo ; endif
-      if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
-        diag_N2_init(i,j,K) = N2_init(K)
-      enddo ; endif
-      if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
-        diag_S2_init(i,j,K) = S2_init(K)
-      enddo ; endif
     else
       ! Could these do loops be combined?
       do K=1,nz+1
-        if (kf(K) == 0.0) then
-          kappa_1d(K) = kappa_avg(kc(K))
-          tke_1d(K) = tke_avg(kc(K))
+        if (kf(i,j,K) == 0.0) then
+          kappa_io(i,j,K) = kappa_avg(i,j,kc(i,j,K))
+          tke_io(i,j,K) = tke_avg(i,j,kc(i,j,K))
         else
-          kappa_1d(K) = (1.0-kf(K)) * kappa_avg(kc(K)) + kf(K) * kappa_avg(kc(K)+1)
-          tke_1d(K) = (1.0-kf(K)) * tke_avg(kc(K)) + kf(K) * tke_avg(kc(K)+1)
+          kappa_io(i,j,K) = (1.0-kf(i,j,K)) * kappa_avg(i,j,kc(i,j,K)) + kf(i,j,K) * kappa_avg(i,j,kc(i,j,K)+1)
+          tke_io(i,j,K) = (1.0-kf(i,j,K)) * tke_avg(i,j,kc(i,j,K)) + kf(i,j,K) * tke_avg(i,j,kc(i,j,K)+1)
         endif
-      enddo
-      do K=1,nz+1
-      if (kf(K) == 0.0) then
-      if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(kc(K))
-      if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(kc(K))
-      if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(i,j,K) = N2_init(kc(K))
-      if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(i,j,K) = S2_init(kc(K))
-      else
-      if (CS%id_N2_mean>0) &
-      diag_N2_mean(i,j,K) = (1.0-kf(K)) * N2_mean(kc(K)) + kf(K) * N2_mean(kc(K)+1)
-      if (CS%id_S2_mean>0) &
-      diag_S2_mean(i,j,K) = (1.0-kf(K)) * S2_mean(kc(K)) + kf(K) * S2_mean(kc(K)+1)
-      if ((CS%id_N2_init>0) .or. CS%debug) &
-      diag_N2_init(i,j,K) = (1.0-kf(K)) * N2_init(kc(K)) + kf(K) * N2_init(kc(K)+1)
-      if ((CS%id_S2_init>0) .or. CS%debug) &
-      diag_S2_init(i,j,K) = (1.0-kf(K)) * S2_init(kc(K)) + kf(K) * S2_init(kc(K)+1)
-      endif
       enddo
     endif ! end of if (nz == nzc)
     ! call cpu_clock_end(id_clock_setup)
-
-    ! 1d -> 3d extrapolation.  This just applies the land mask to the 1d fields.
-    do K=1,nz+1
-      kappa_io(i,j,K) =  kappa_1d(K)
-      tke_io(i,j,K) = tke_1d(K)
-      kv_io(i,j,K) = kappa_1d(K) * CS%Prandtl_turb
-    enddo
  
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
   
-  !$omp target exit data map(delete: h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
-  !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
+  !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp &                 kf, kc, kappa, Idz)
+  !$omp target exit data map(delete: tke, kappa_avg, tke_avg)
   !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
 
   if (CS%debug) then
@@ -730,7 +661,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                               h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
                               tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv, &
-                              CS, GV, US)
+                              CS, G, GV, US, i, j)
     ! call cpu_clock_begin(Id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
       if (nz == nzc) then
@@ -894,41 +825,42 @@ end subroutine Calc_kappa_shear_vertex
 !> This subroutine calculates shear-driven diffusivity and TKE in a single column
 subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_lay, &
                               u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, tke_avg, N2_init, S2_init, &
-                              N2_mean, S2_mean, tv, CS, GV, US )
+                              N2_mean, S2_mean, tv, CS, G, GV, US, i, j )
   !$omp declare target
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure.
-  real, dimension(SZK_(GV)+1), &
+  type(ocean_grid_type),   intent(in)    :: G  !< The ocean's horizontal grid structure.
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
                      intent(inout) :: kappa !< The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
                      intent(out)   :: tke  !< The Turbulent Kinetic Energy per unit mass at
                                            !! an interface [Z2 T-2 ~> m2 s-2].
   integer,           intent(in)    :: nzc  !< The number of active layers in the column.
   real,              intent(in)    :: f2   !< The square of the Coriolis parameter [T-2 ~> s-2].
   real,              intent(in)    :: surface_pres  !< The surface pressure [R L2 T-2 ~> Pa].
-  real, dimension(SZK_(GV)), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: hlay  !< The layer thickness [H ~> m or kg m-2]
-  real, dimension(SZK_(GV)), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: dz_lay !< The geometric layer thickness in height units [Z ~> m]
-  real, dimension(SZK_(GV)), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: u0xdz !< The initial zonal velocity times hlay [H L T-1 ~> m2 s-1 or kg m-1 s-1]
-  real, dimension(SZK_(GV)), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: v0xdz !< The initial meridional velocity times the
                                             !! layer thickness [H L T-1 ~> m2 s-1 or kg m-1 s-1]
-  real, dimension(SZK_(GV)), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: T0xdz !< The initial temperature times hlay [C H ~> degC m or degC kg m-2]
-  real, dimension(SZK_(GV)), &
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: S0xdz !< The initial salinity times hlay [S H ~> ppt m or ppt kg m-2]
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: kappa_avg !< The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: tke_avg  !< The time-weighted average of TKE [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: N2_mean  !< The time-weighted average of N2 [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: S2_mean  !< The time-weighted average of S2 [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: N2_init  !< The initial value of N2 [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZK_(GV)+1), &
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: S2_init  !< The initial value of S2 [Z2 T-2 ~> m2 s-2].
   real,                    intent(in)    :: dt !< Time increment [T ~> s].
   type(thermo_var_ptrs),   intent(in)    :: tv !< A structure containing pointers to any
@@ -937,9 +869,10 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   type(Kappa_shear_CS),    pointer       :: CS !< The control structure returned by a previous
                                                !! call to kappa_shear_init.
   type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
+  integer,           intent(in)    :: i, j !< The horizontal indices of the column being processed. 
 
   ! Local variables
-  real, dimension(nzc) :: &
+  real, dimension(75) :: &
     u, &        ! The zonal velocity after a timestep of mixing [L T-1 ~> m s-1].
     v, &        ! The meridional velocity after a timestep of mixing [L T-1 ~> m s-1].
     Idz, &      ! The inverse of the distance between TKE points [Z-1 ~> m-1].
@@ -948,7 +881,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     u_test, v_test, & ! Temporary velocities [L T-1 ~> m s-1].
     T_test, S_test ! Temporary temperatures [C ~> degC] and salinities [S ~> ppt].
 
-  real, dimension(nzc+1) :: &
+  real, dimension(76) :: &
     N2, &       ! The squared buoyancy frequency at an interface [T-2 ~> s-2].
     h_Int, &    ! The extent of a finite-volume space surrounding an interface,
                 ! as used in calculating kappa and TKE [H ~> m or kg m-2]
@@ -1054,23 +987,23 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 
 
   ! Set up Idz as the inverse of layer thicknesses.
-  do k=1,nzc ; Idz(k) = 1.0 / dz_lay(k) ; enddo
+  do k=1,nzc ; Idz(k) = 1.0 / dz_lay(i,j,k) ; enddo
   !   Set up I_dz_int as the inverse of the distance between
   ! adjacent layer centers.
-  I_dz_int(1) = 2.0 / dz_lay(1)
+  I_dz_int(1) = 2.0 / dz_lay(i,j,1)
   dist_from_top(1) = 0.0 ; h_from_top(1) = 0.0
   do K=2,nzc
-    I_dz_int(K) = 2.0 / (dz_lay(k-1) + dz_lay(k))
-    dist_from_top(K) = dist_from_top(K-1) + dz_lay(k-1)
-    h_from_top(K) = h_from_top(K-1) + hlay(k-1)
+    I_dz_int(K) = 2.0 / (dz_lay(i,j,K-1) + dz_lay(i,j,K))
+    dist_from_top(K) = dist_from_top(K-1) + dz_lay(i,j,K-1)
+    h_from_top(K) = h_from_top(K-1) + hlay(i,j,K-1)
   enddo
-  I_dz_int(nzc+1) = 2.0 / dz_lay(nzc)
+  I_dz_int(nzc+1) = 2.0 / dz_lay(i,j,nzc)
 
   ! Find the inverse of the squared distances from the boundaries.
   dist_from_bot = 0.0 ; h_from_bot = 0.0
   do K=nzc,2,-1
-    dist_from_bot = dist_from_bot + dz_lay(k)
-    h_from_bot = h_from_bot + hlay(k)
+    dist_from_bot = dist_from_bot + dz_lay(i,j,K)
+    h_from_bot = h_from_bot + hlay(i,j,K )
     ! Find the inverse of the squared distances from the boundaries,
     I_L2_bdry(K) = ((dist_from_top(K) + dist_from_bot) * (h_from_top(K) + h_from_bot)) / &
                    ((dist_from_top(K) * dist_from_bot) * (h_from_top(K) * h_from_bot))
@@ -1082,40 +1015,40 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   ! layers and applying a time-step of background diffusion.
   if (nzc > 1) then
     a1(2) = k0dt*I_dz_int(2)
-    b1 = 1.0 / (hlay(1) + a1(2))
-    u(1) = b1 * u0xdz(1) ; v(1) = b1 * v0xdz(1)
-    T(1) = b1 * T0xdz(1) ; Sal(1) = b1 * S0xdz(1)
-    c1(2) = a1(2) * b1 ; d1 = hlay(1) * b1 ! = 1 - c1
+    b1 = 1.0 / (hlay(i,j,1) + a1(2))
+    u(1) = b1 * u0xdz(i,j,1) ; v(1) = b1 * v0xdz(i,j,1)
+    T(1) = b1 * T0xdz(i,j,1) ; Sal(1) = b1 * S0xdz(i,j,1)
+    c1(2) = a1(2) * b1 ; d1 = hlay(i,j,1) * b1 ! = 1 - c1
     do k=2,nzc-1
-      bd1 = hlay(k) + d1*a1(k)
+      bd1 = hlay(i,j,k) + d1*a1(k)
       a1(k+1) = k0dt*I_dz_int(k+1)
       b1 = 1.0 / (bd1 + a1(k+1))
-      u(k) = b1 * (u0xdz(k) + a1(k)*u(k-1))
-      v(k) = b1 * (v0xdz(k) + a1(k)*v(k-1))
-      T(k) = b1 * (T0xdz(k) + a1(k)*T(k-1))
-      Sal(k) = b1 * (S0xdz(k) + a1(k)*Sal(k-1))
+      u(k) = b1 * (u0xdz(i,j,k) + a1(k)*u(k-1))
+      v(k) = b1 * (v0xdz(i,j,k) + a1(k)*v(k-1))
+      T(k) = b1 * (T0xdz(i,j,k) + a1(k)*T(k-1))
+      Sal(k) = b1 * (S0xdz(i,j,k) + a1(k)*Sal(k-1))
       c1(k+1) = a1(k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
     enddo
     ! rho or T and S have insulating boundary conditions, u & v use no-slip
     ! bottom boundary conditions (if kappa0 > 0).
     ! For no-slip bottom boundary conditions
-    b1 = 1.0 / ((hlay(nzc) + d1*a1(nzc)) + k0dt*I_dz_int(nzc+1))
-    u(nzc) = b1 * (u0xdz(nzc) + a1(nzc)*u(nzc-1))
-    v(nzc) = b1 * (v0xdz(nzc) + a1(nzc)*v(nzc-1))
+    b1 = 1.0 / ((hlay(i,j,nzc) + d1*a1(nzc)) + k0dt*I_dz_int(nzc+1))
+    u(nzc) = b1 * (u0xdz(i,j,nzc) + a1(nzc)*u(nzc-1))
+    v(nzc) = b1 * (v0xdz(i,j,nzc) + a1(nzc)*v(nzc-1))
     ! For insulating boundary conditions
-    b1 = 1.0 / (hlay(nzc) + d1*a1(nzc))
-    T(nzc) = b1 * (T0xdz(nzc) + a1(nzc)*T(nzc-1))
-    Sal(nzc) = b1 * (S0xdz(nzc) + a1(nzc)*Sal(nzc-1))
+    b1 = 1.0 / (hlay(i,j,nzc) + d1*a1(nzc))
+    T(nzc) = b1 * (T0xdz(i,j,nzc) + a1(nzc)*T(nzc-1))
+    Sal(nzc) = b1 * (S0xdz(i,j,nzc) + a1(nzc)*Sal(nzc-1))
     do k=nzc-1,1,-1
       u(k) = u(k) + c1(k+1)*u(k+1) ; v(k) = v(k) + c1(k+1)*v(k+1)
       T(k) = T(k) + c1(k+1)*T(k+1) ; Sal(k) = Sal(k) + c1(k+1)*Sal(k+1)
     enddo
   else
     ! This is correct, but probably unnecessary.
-    b1 = 1.0 / (hlay(1) + k0dt*I_dz_int(2))
-    u(1) = b1 * u0xdz(1) ; v(1) = b1 * v0xdz(1)
-    b1 = 1.0 / hlay(1)
-    T(1) = b1 * T0xdz(1) ; Sal(1) = b1 * S0xdz(1)
+    b1 = 1.0 / (hlay(i,j,1) + k0dt*I_dz_int(2))
+    u(1) = b1 * u0xdz(i,j,1) ; v(1) = b1 * v0xdz(i,j,1)
+    b1 = 1.0 / hlay(i,j,1)
+    T(1) = b1 * T0xdz(i,j,1) ; Sal(1) = b1 * S0xdz(i,j,1)
   endif
 
   ! This uses half the harmonic mean of thicknesses to provide two estimates
@@ -1124,26 +1057,26 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   ! layers have thin cells, and the total thickness adds up properly.
   ! The top- and bottom- interfaces have zero thickness, consistent with
   ! adding additional zero thickness layers.
-  h_Int(1) = 0.0 ; h_Int(2) = hlay(1)
-  dz_Int(1) = 0.0 ; dz_Int(2) = dz_lay(1)
+  h_Int(1) = 0.0 ; h_Int(2) = hlay(i,j,1)
+  dz_Int(1) = 0.0 ; dz_Int(2) = dz_lay(i,j,1)
   do K=2,nzc-1
-    Norm = 1.0 / (hlay(k)*(hlay(k-1)+hlay(k+1)) + 2.0*hlay(k-1)*hlay(k+1))
-    wt_a = ((hlay(k)+hlay(k+1)) * hlay(k-1)) * Norm
-    wt_b = ((hlay(k-1)+hlay(k)) * hlay(k+1)) * Norm
-    h_Int(K) = h_Int(K) + hlay(k) * wt_a
-    h_Int(K+1) = hlay(k) * wt_b
-    dz_Int(K) = dz_Int(K) + dz_lay(k) * wt_a
-    dz_Int(K+1) = dz_lay(k) * wt_b
+    Norm = 1.0 / (hlay(i,j,K)*(hlay(i,j,K-1)+hlay(i,j,K+1)) + 2.0*hlay(i,j,K-1)*hlay(i,j,K+1))
+    wt_a = ((hlay(i,j,K)+hlay(i,j,K+1)) * hlay(i,j,K-1)) * Norm
+    wt_b = ((hlay(i,j,K-1)+hlay(i,j,K)) * hlay(i,j,K+1)) * Norm
+    h_Int(K) = h_Int(K) + hlay(i,j,K) * wt_a
+    h_Int(K+1) = hlay(i,j,K) * wt_b
+    dz_Int(K) = dz_Int(K) + dz_lay(i,j,K) * wt_a
+    dz_Int(K+1) = dz_lay(i,j,K) * wt_b
   enddo
-  h_Int(nzc) = h_Int(nzc) + hlay(nzc) ; h_Int(nzc+1) = 0.0
-  dz_Int(nzc) = dz_Int(nzc) + dz_lay(nzc) ; dz_Int(nzc+1) = 0.0
+  h_Int(nzc) = h_Int(nzc) + hlay(i,j,nzc) ; h_Int(nzc+1) = 0.0
+  dz_Int(nzc) = dz_Int(nzc) + dz_lay(i,j,nzc) ; dz_Int(nzc+1) = 0.0
 
   if (GV%Boussinesq) then
     do K=1,nzc+1 ; dz_h_Int(K) = GV%H_to_Z ; enddo
   else
     ! Find an effective average specific volume around an interface.
     dz_h_Int(1:nzc+1) = 0.0
-    if (hlay(1) > 0.0) dz_h_Int(1) = dz_lay(1) / hlay(1)
+    if (hlay(i,j,1) > 0.0) dz_h_Int(1) = dz_lay(i,j,1) / hlay(i,j,1)
     do K=2,nzc+1
       if (h_Int(K) > 0.0) then
         dz_h_Int(K) = dz_Int(K) / h_Int(K)
@@ -1157,9 +1090,9 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   if (use_temperature) then
     pressure(1) = surface_pres
     do K=2,nzc
-      pressure(K) = pressure(K-1) + gR0*hlay(k-1)
-      T_int(K) = 0.5*(T(k-1) + T(k))
-      Sal_int(K) = 0.5*(Sal(k-1) + Sal(k))
+      pressure(K) = pressure(K-1) + gR0*hlay(i,j,K-1)
+      T_int(K) = 0.5*(T(K-1) + T(K))
+      Sal_int(K) = 0.5*(Sal(K-1) + Sal(K))
     enddo
     if (GV%Boussinesq .or. GV%semi_Boussinesq) then
       call calculate_density_derivs_dev(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
@@ -1197,8 +1130,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   call calculate_projected_state(kappa, u, v, T, Sal, 0.0, nzc, hlay, I_dz_int, dbuoy_dT, dbuoy_dS, &
                                  CS%vel_underflow, u, v, T, Sal, N2, S2, GV, US)
   do K=1,nzc+1
-    N2_init(K) = N2(K)
-    S2_init(K) = S2(K)
+    N2_init(i,j,K) = N2(K)
+    S2_init(i,j,K) = S2(K)
   enddo
 
 
@@ -1208,7 +1141,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   dt_rem = dt
   do K=1,nzc+1
     K_Q(K) = 0.0
-    kappa_avg(K) = 0.0 ; tke_avg(K) = 0.0 ; N2_mean(K) = 0.0 ; S2_mean(K) = 0.0
+    kappa_avg(i,j,K) = 0.0 ; tke_avg(i,j,K) = 0.0 ; N2_mean(i,j,K) = 0.0 ; S2_mean(i,j,K) = 0.0
     local_src_avg(K) = 0.0
     ! Use the grid spacings to scale errors in the source.
     if ( h_Int(K) > 0.0 ) &
@@ -1225,8 +1158,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 ! ----------------------------------------------------
 
   ! call cpu_clock_begin(id_clock_KQ)
-    call find_kappa_tke(N2, S2, kappa, Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
-                        nzc, CS, GV, US, K_Q, tke, kappa_out, kappa_src, local_src)
+    call find_kappa_tke(N2, S2, kappa(i,j,:), Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
+                        nzc, CS, GV, US, K_Q, tke(i,j,:), kappa_out, kappa_src, local_src)
   ! call cpu_clock_end(id_clock_KQ)
 
   ! call cpu_clock_begin(id_clock_avg)
@@ -1263,7 +1196,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         ! timestep is found long before the minimum is reached, so the
         ! value of max_KS_it may be unimportant, especially if it is large
         ! enough.
-        call calculate_projected_state(kappa_out, u, v, T, Sal, 0.5*dt_test, nzc, hlay, I_dz_int, &
+        call calculate_projected_state(kappa_out, u, v, T, Sal, 0.5*dt_test, nzc, hlay(i,j,:), I_dz_int, &
                                        dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, &
                                        T_test, S_test, N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
         valid_dt = .true.
@@ -1296,7 +1229,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
       if ((dt_test < dt_rem) .and. valid_dt) then
         dt_inc = 0.5*dt_test
         do itt_dt=1,dt_refinements
-          call calculate_projected_state(kappa_out, u, v, T, Sal, 0.5*(dt_test+dt_inc), nzc, hlay, &
+          call calculate_projected_state(kappa_out, u, v, T, Sal, 0.5*(dt_test+dt_inc), nzc, hlay(i,j,:), &
                    I_dz_int, dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, T_test, S_test, &
                    N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
           valid_dt = .true.
@@ -1341,12 +1274,12 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         kappa_mid(K) = 0.0
         ! This would be here but does nothing.
         ! kappa_avg(K) = kappa_avg(K) + kappa_mid(K)*dt_wt
-        tke_avg(K) = tke_avg(K) + dt_wt*tke(K)
+        tke_avg(i,j,K) = tke_avg(i,j,K) + dt_wt*tke(i,j,K)
       enddo
     ! call cpu_clock_end(id_clock_avg)
     else
     ! call cpu_clock_begin(id_clock_project)
-      call calculate_projected_state(kappa_out, u, v, T, Sal, dt_now, nzc, hlay, I_dz_int, &
+      call calculate_projected_state(kappa_out, u, v, T, Sal, dt_now, nzc, hlay(i,j,:), I_dz_int, &
                                      dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, &
                                      T_test, S_test, N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
     ! call cpu_clock_end(id_clock_project)
@@ -1365,7 +1298,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
       enddo
 
     ! call cpu_clock_begin(id_clock_project)
-      call calculate_projected_state(kappa_mid, u, v, T, Sal, dt_now, nzc, hlay, I_dz_int, &
+      call calculate_projected_state(kappa_mid, u, v, T, Sal, dt_now, nzc, hlay(i,j,:), I_dz_int, &
                                      dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, &
                                      T_test, S_test, N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
     ! call cpu_clock_end(id_clock_project)
@@ -1379,11 +1312,11 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
       dt_wt = dt_now / dt ; dt_rem = dt_rem - dt_now
       do K=1,nzc+1
         kappa_mid(K) = 0.5*(kappa_out(K) + kappa_pred(K))
-        kappa_avg(K) = kappa_avg(K) + kappa_mid(K)*dt_wt
-        tke_avg(K) = tke_avg(K) + dt_wt*0.5*(tke_pred(K) + tke(K))
-        N2_mean(K) = N2_mean(K) + dt_wt*N2(K)
-        S2_mean(K) = S2_mean(K) + dt_wt*S2(K)
-        kappa(K) = kappa_pred(K) ! First guess for the next iteration.
+        kappa_avg(i,j,K) = kappa_avg(i,j,K) + kappa_mid(K)*dt_wt
+        tke_avg(i,j,K) = tke_avg(i,j,K) + dt_wt*0.5*(tke_pred(K) + tke(i,j,K))
+        N2_mean(i,j,K) = N2_mean(i,j,K) + dt_wt*N2(K)
+        S2_mean(i,j,K) = S2_mean(i,j,K) + dt_wt*S2(K)
+        kappa(i,j,K) = kappa_pred(K) ! First guess for the next iteration.
       enddo
 
     ! call cpu_clock_end(id_clock_avg)
@@ -1392,7 +1325,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     if (dt_rem > 0.0) then
       ! Update the values of u, v, T, Sal, N2, and S2 for the next iteration.
     ! call cpu_clock_begin(id_clock_project)
-      call calculate_projected_state(kappa_mid, u, v, T, Sal, dt_now, nzc, hlay, I_dz_int, &
+      call calculate_projected_state(kappa_mid, u, v, T, Sal, dt_now, nzc, hlay(i,j,:), I_dz_int, &
                                      dbuoy_dT, dbuoy_dS, CS%vel_underflow, u, v, T, Sal, N2, S2, &
                                      GV, US)
     ! call cpu_clock_end(id_clock_project)
@@ -1441,7 +1374,7 @@ subroutine calculate_projected_state(kappa, u0, v0, T0, S0, dt, nz, dz, I_dz_int
                                               !! diffusivity.
 
   ! Local variables
-  real, dimension(nz+1) :: c1 ! A tridiagonal variable [nondim]
+  real, dimension(76) :: c1 ! A tridiagonal variable [nondim]
   real :: a_a, a_b   ! Tridiagonal coupling coefficients [H ~> m or kg m-2]
   real :: b1, b1nz_0 ! Tridiagonal variables [H-1 ~> m-1 or m2 kg-1]
   real :: bd1        ! A term in the denominator of b1 [H ~> m or kg m-2]
@@ -1574,10 +1507,10 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
   ! This subroutine calculates new, consistent estimates of TKE and kappa.
 
   ! Local variables
-  real, dimension(nz) :: &
+  real, dimension(75) :: &
     aQ, &       ! aQ is the coupling between adjacent interfaces in the TKE equations [H T-1 ~> m s-1 or kg m-2 s-1]
     dQdz        ! Half the partial derivative of TKE with depth [Z T-2 ~> m s-2].
-  real, dimension(nz+1) :: &
+  real, dimension(76  ) :: &
     dK, &         ! The change in kappa [H Z T-1 ~> m2 s-1 or Pa s].
     dQ, &         ! The change in TKE [Z2 T-2 ~> m2 s-2].
     cQ, cK, &     ! cQ and cK are the upward influences in the tridiagonal and
