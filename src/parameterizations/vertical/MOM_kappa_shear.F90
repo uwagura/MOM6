@@ -239,35 +239,32 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
   ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
-  !$omp target enter data map(alloc: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
-  !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp target enter data map(alloc: h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
-  !$omp target teams distribute parallel do collapse(2) private(h_1d, u_1d, v_1d, T_1d, S_1d, &
-  !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp target teams distribute parallel do collapse(2) private(h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz, tke_avg, kappa_avg, &
   !$omp &                 N2_init, S2_init, N2_mean, S2_mean, tke)
   do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
     
     ! Convert layer thicknesses into geometric thickness in height units.
-    ! This acccess GV%H_to_RZ, which isn't technically on the device, but its a scalar so maybe ok? 
-    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV)
+    call thickness_to_dz(h, tv, dz_1d, i, j, G, GV) 
     
-    do k=1,nz
-      h_1d(k) = h(i,j,k)
-      u_1d(k) = u_in(i,j,k) 
-      v_1d(k) = v_in(i,j,k)
-        if (use_temperature) then 
-          T_1d(k) = tv%T(i,j,k)
-          S_1d(k) = tv%S(i,j,k)
-        else 
-          ! GV%RLay is already on the device
-          rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
-        endif
-    enddo
+    ! do k=1,nz
+    !   ! h_1d(k) = h(i,j,k)
+    !   ! u_1d(k) = u_in(i,j,k) 
+    !   ! v_1d(k) = v_in(i,j,k)
+    !     if (use_temperature) then 
+    !       T_1d(k) = tv%T(i,j,k)
+    !       S_1d(k) = tv%S(i,j,k)
+    !     else 
+    !       ! GV%RLay is already on the device
+    !       rho_1d(k) = GV%Rlay(k) ! Could be tv%Rho(i,j,k) ?
+    !     endif
+    ! enddo
 
     ! Store a transposed version of the initial arrays.
     ! Any elimination of massless layers would occur here.
@@ -291,16 +288,16 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 !             ((h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless))) nzc = nzc+1
 
         kc(k) = nzc
-        h_lay(nzc) = h_lay(nzc) + h_1d(k)
+        h_lay(nzc) = h_lay(nzc) + h(i,j,k)
         dz_lay(nzc) = dz_lay(nzc) + dz_1d(k)
-        u0xdz(nzc) = u0xdz(nzc) + u_1d(k)*h_1d(k)
-        v0xdz(nzc) = v0xdz(nzc) + v_1d(k)*h_1d(k)
+        u0xdz(nzc) = u0xdz(nzc) + u_in(i,j,k)*h(i,j,k)
+        v0xdz(nzc) = v0xdz(nzc) + v_in(i,j,k)*h(i,j,k)
         if (use_temperature) then
-          T0xdz(nzc) = T0xdz(nzc) + T_1d(k)*h_1d(k)
-          S0xdz(nzc) = S0xdz(nzc) + S_1d(k)*h_1d(k)
+          T0xdz(nzc) = T0xdz(nzc) + tv%T(i,j,k)*h(i,j,k)
+          S0xdz(nzc) = S0xdz(nzc) + tv%S(i,j,k)*h(i,j,k)
         else
-          T0xdz(nzc) = T0xdz(nzc) + rho_1d(k)*h_1d(k)
-          S0xdz(nzc) = S0xdz(nzc) + rho_1d(k)*h_1d(k)
+          T0xdz(nzc) = T0xdz(nzc) + GV%Rlay(k)*h(i,j,k)
+          S0xdz(nzc) = S0xdz(nzc) + GV%Rlay(k)*h(i,j,k)
         endif
       enddo
       kc(nz+1) = nzc+1
@@ -393,21 +390,21 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
         endif
       enddo
       do K=1,nz+1
-        if (kf(K) == 0.0) then
-          if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(kc(K))
-          if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(kc(K))
-          if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(i,j,K) = N2_init(kc(K))
-          if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(i,j,K) = S2_init(kc(K))
-        else
-          if (CS%id_N2_mean>0) &
-            diag_N2_mean(i,j,K) = (1.0-kf(K)) * N2_mean(kc(K)) + kf(K) * N2_mean(kc(K)+1)
-          if (CS%id_S2_mean>0) &
-            diag_S2_mean(i,j,K) = (1.0-kf(K)) * S2_mean(kc(K)) + kf(K) * S2_mean(kc(K)+1)
-          if ((CS%id_N2_init>0) .or. CS%debug) &
-            diag_N2_init(i,j,K) = (1.0-kf(K)) * N2_init(kc(K)) + kf(K) * N2_init(kc(K)+1)
-          if ((CS%id_S2_init>0) .or. CS%debug) &
-            diag_S2_init(i,j,K) = (1.0-kf(K)) * S2_init(kc(K)) + kf(K) * S2_init(kc(K)+1)
-        endif
+      if (kf(K) == 0.0) then
+      if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(kc(K))
+      if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(kc(K))
+      if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(i,j,K) = N2_init(kc(K))
+      if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(i,j,K) = S2_init(kc(K))
+      else
+      if (CS%id_N2_mean>0) &
+      diag_N2_mean(i,j,K) = (1.0-kf(K)) * N2_mean(kc(K)) + kf(K) * N2_mean(kc(K)+1)
+      if (CS%id_S2_mean>0) &
+      diag_S2_mean(i,j,K) = (1.0-kf(K)) * S2_mean(kc(K)) + kf(K) * S2_mean(kc(K)+1)
+      if ((CS%id_N2_init>0) .or. CS%debug) &
+      diag_N2_init(i,j,K) = (1.0-kf(K)) * N2_init(kc(K)) + kf(K) * N2_init(kc(K)+1)
+      if ((CS%id_S2_init>0) .or. CS%debug) &
+      diag_S2_init(i,j,K) = (1.0-kf(K)) * S2_init(kc(K)) + kf(K) * S2_init(kc(K)+1)
+      endif
       enddo
     endif ! end of if (nz == nzc)
     ! call cpu_clock_end(id_clock_setup)
@@ -421,8 +418,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
  
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
   
-  !$omp target exit data map(delete: h_1d, u_1d, v_1d, T_1d, S_1d, rho_1d, &
-  !$omp &                 h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp target exit data map(delete: h_lay, dz_1d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, kappa_1d, tke_1d, Idz)
   !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
   !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
