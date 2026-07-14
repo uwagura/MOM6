@@ -349,17 +349,19 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
  
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
   
-  !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, Idz)
-  !$omp target exit data map(delete: tke, kappa_avg, tke_avg)
-  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
 
   if (CS%debug) then
+    !$omp target update from( diag_N2_init, diag_S2_init, kappa_io, tke_io )
     call hchksum(diag_N2_init, "kappa_shear N2_init", G%HI, unscale=US%s_to_T**2)
     call hchksum(diag_S2_init, "kappa_shear S2_init", G%HI, unscale=US%s_to_T**2)
     call hchksum(kappa_io, "kappa", G%HI, unscale=GV%HZ_T_to_m2_s)
     call hchksum(tke_io, "tke", G%HI, unscale=US%Z_to_m**2*US%s_to_T**2)
   endif
+
+  !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
+  !$omp &                 kf, kc, kappa, Idz)
+  !$omp target exit data map(delete: tke, kappa_avg, tke_avg)
+  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
 
   if (CS%id_Kd_shear > 0) call post_data(CS%id_Kd_shear, kappa_io, CS%diag)
   if (CS%id_TKE > 0) call post_data(CS%id_TKE, tke_io, CS%diag)
