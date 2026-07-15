@@ -174,12 +174,21 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     tke, &          ! The Turbulent Kinetic Energy per unit mass at an interface [Z2 T-2 ~> m2 s-2].
     kappa_avg, &    ! The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
     tke_avg, &      ! The time-weighted average of TKE [Z2 T-2 ~> m2 s-2]
-    kc, &           ! The index map between the original
-                    ! interfaces and the interfaces with massless layers
-                    ! merged into nearby massive layers.
+    N2_init, &      ! N2 as provided to this routine on the vertically reduced grid,
+                    ! valid only for K=1:nzc+1 [T-2 ~> s-2].
+    S2_init, &      ! S2 as provided to this routine on the vertically reduced grid,
+                    ! valid only for K=1:nzc+1 [T-2 ~> s-2].
+    N2_mean, &      ! The time-weighted average of N2 on the vertically reduced grid,
+                    ! valid only for K=1:nzc+1 [T-2 ~> s-2].
+    S2_mean, &      ! The time-weighted average of S2 on the vertically reduced grid,
+                    ! valid only for K=1:nzc+1 [T-2 ~> s-2].
     kf              ! The fractional weight of interface kc+1 for
                     ! interpolating back to the original index space [nondim].
-  
+  integer, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: &
+    kc              ! The index map between the original
+                    ! interfaces and the interfaces with massless layers
+                    ! merged into nearby massive layers.
+
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
     dz_3d, &    ! Vertical distance between interface heights [Z ~> m].
     Idz, &      ! The inverse of the thickness of the merged layers [H-1 ~> m2 kg-1].
@@ -230,7 +239,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp &                 kf, kc, kappa, Idz)
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
-  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg)
+  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
 
   ! Calculate thicknesses outside of main kernel
   ! Convert layer thicknesses into geometric thickness in height units.
@@ -319,7 +328,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
     call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
                            h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                           tke_avg, diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
+                           tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
                            tv, CS, G, GV, US, i ,j)
 
     ! call cpu_clock_begin(id_clock_setup)
@@ -333,6 +342,18 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
           tke_io(i,j,K) = tke_avg(i,j,K)
         endif
       enddo
+      if (CS%id_N2_mean>0) then ; do K=1,nz+1
+        diag_N2_mean(i,j,K) = N2_mean(i,j,K)
+      enddo ; endif
+      if (CS%id_S2_mean>0) then ; do K=1,nz+1
+        diag_S2_mean(i,j,K) = S2_mean(i,j,K)
+      enddo ; endif
+      if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
+        diag_N2_init(i,j,K) = N2_init(i,j,K)
+      enddo ; endif
+      if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
+        diag_S2_init(i,j,K) = S2_init(i,j,K)
+      enddo ; endif
     else
       ! Could these do loops be combined?
       do K=1,nz+1
@@ -344,9 +365,45 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
           tke_io(i,j,K) = (1.0-kf(i,j,K)) * tke_avg(i,j,kc(i,j,K)) + kf(i,j,K) * tke_avg(i,j,kc(i,j,K)+1)
         endif
       enddo
+      do K=1,nz+1
+        if (kf(i,j,K) == 0.0) then
+          if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(i,j,kc(i,j,K))
+          if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(i,j,kc(i,j,K))
+          if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(i,j,K) = N2_init(i,j,kc(i,j,K))
+          if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(i,j,K) = S2_init(i,j,kc(i,j,K))
+        else
+          if (CS%id_N2_mean>0) &
+            diag_N2_mean(i,j,K) = (1.0-kf(i,j,K)) * N2_mean(i,j,kc(i,j,K)) + kf(i,j,K) * N2_mean(i,j,kc(i,j,K)+1)
+          if (CS%id_S2_mean>0) &
+            diag_S2_mean(i,j,K) = (1.0-kf(i,j,K)) * S2_mean(i,j,kc(i,j,K)) + kf(i,j,K) * S2_mean(i,j,kc(i,j,K)+1)
+          if ((CS%id_N2_init>0) .or. CS%debug) &
+            diag_N2_init(i,j,K) = (1.0-kf(i,j,K)) * N2_init(i,j,kc(i,j,K)) + kf(i,j,K) * N2_init(i,j,kc(i,j,K)+1)
+          if ((CS%id_S2_init>0) .or. CS%debug) &
+            diag_S2_init(i,j,K) = (1.0-kf(i,j,K)) * S2_init(i,j,kc(i,j,K)) + kf(i,j,K) * S2_init(i,j,kc(i,j,K)+1)
+        endif
+      enddo
     endif ! end of if (nz == nzc)
+
+    do K=1,nz+1
+      kv_io(i,j,K) = kappa_io(i,j,K) * CS%Prandtl_turb
+    enddo
     ! call cpu_clock_end(id_clock_setup)
- 
+  else  ! Land points, still inside the i,j-loop.
+    do K=1,nz+1
+      kappa_io(i,j,K) = 0.0 ; tke_io(i,j,K) = 0.0 ; kv_io(i,j,K) = 0.0
+    enddo
+    if (CS%id_N2_mean>0) then ; do K=1,nz+1
+      diag_N2_mean(i,j,K) = 0.0
+    enddo ; endif
+    if (CS%id_S2_mean>0) then ; do K=1,nz+1
+      diag_S2_mean(i,j,K) = 0.0
+    enddo ; endif
+    if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
+      diag_N2_init(i,j,K) = 0.0
+    enddo ; endif
+    if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
+      diag_S2_init(i,j,K) = 0.0
+    enddo ; endif
   endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
   
 
@@ -360,7 +417,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, Idz)
-  !$omp target exit data map(delete: tke, kappa_avg, tke_avg)
+  !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
   !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
 
   if (CS%id_Kd_shear > 0) call post_data(CS%id_Kd_shear, kappa_io, CS%diag)
