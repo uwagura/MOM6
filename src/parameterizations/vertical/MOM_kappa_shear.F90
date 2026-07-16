@@ -962,6 +962,10 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     kappa_mid, & ! The average of the initial and predictor estimates of kappa [H Z T-1 ~> m2 s-1 or Pa s]
     tke_pred, & ! The value of TKE from a predictor step [Z2 T-2 ~> m2 s-2].
     kappa_pred, & ! The value of kappa from a predictor step [H Z T-1 ~> m2 s-1 or Pa s]
+    kappa_col, & ! A contiguous per-column copy of kappa(i,j,:) used as an input to
+                 ! find_kappa_tke, to avoid passing a non-contiguous array section.
+    tke_col, &   ! A contiguous per-column copy of tke(i,j,:) used as an output from
+                 ! find_kappa_tke, to avoid passing a non-contiguous array section.
     pressure, & ! The pressure at an interface [R L2 T-2 ~> Pa].
     T_int, &    ! The temperature interpolated to an interface [C ~> degC].
     Sal_int, &  ! The salinity interpolated to an interface [S ~> ppt].
@@ -1217,8 +1221,10 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 ! ----------------------------------------------------
 
   ! call cpu_clock_begin(id_clock_KQ)
-    call find_kappa_tke(N2, S2, kappa(i,j,:), Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
-                        nzc, CS, GV, US, K_Q, tke(i,j,:), kappa_out, kappa_src, local_src)
+    do K=1,nzc+1 ; kappa_col(K) = kappa(i,j,K) ; enddo
+    call find_kappa_tke(N2, S2, kappa_col, Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
+                        nzc, CS, GV, US, K_Q, tke_col, kappa_out, kappa_src, local_src)
+    do K=1,nzc+1 ; tke(i,j,K) = tke_col(K) ; enddo
   ! call cpu_clock_end(id_clock_KQ)
 
   ! call cpu_clock_begin(id_clock_avg)
