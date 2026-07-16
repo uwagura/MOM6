@@ -1900,7 +1900,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
         ! Truncate away negligibly small values of kappa.
         if (dK(K) <= cKcomp*(kappa_trunc - kappa(K))) then
           dK(K) = -cKcomp*kappa(K)
-        if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
+!         if (K > ke_src) then ; ke_kappa = k-1 ; K_Q(K) = 0.0 ; exit ; endif
         elseif (dK(K) < cKcomp*(2.0*kappa_trunc - kappa(K))) then
           dK(K) = 2.0 * dK(K) - cKcomp*(2.0*kappa_trunc - kappa(K))
         endif
