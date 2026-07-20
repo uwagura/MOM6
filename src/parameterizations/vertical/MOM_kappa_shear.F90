@@ -17,7 +17,7 @@ use MOM_interface_heights, only : thickness_to_dz
 use MOM_unit_scaling,      only : unit_scale_type
 use MOM_variables,         only : thermo_var_ptrs
 use MOM_verticalGrid,      only : verticalGrid_type
-use MOM_EOS,               only : calculate_density_derivs, calculate_density_derivs_dev
+use MOM_EOS,               only : calculate_density_derivs
 use MOM_EOS,               only : calculate_density, calculate_specific_vol_derivs, EOS_type
 
 implicit none ; private
@@ -182,12 +182,34 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
                     ! valid only for K=1:nzc+1 [T-2 ~> s-2].
     S2_mean, &      ! The time-weighted average of S2 on the vertically reduced grid,
                     ! valid only for K=1:nzc+1 [T-2 ~> s-2].
-    kf              ! The fractional weight of interface kc+1 for
+    kf, &           ! The fractional weight of interface kc+1 for
                     ! interpolating back to the original index space [nondim].
+    u, &            ! The zonal velocity after a timestep of mixing [L T-1 ~> m s-1].
+    v, &            ! The meridional velocity after a timestep of mixing [L T-1 ~> m s-1].
+    T, &            ! The potential temperature after a timestep of mixing [C ~> degC].
+    Sal, &          ! The salinity after a timestep of mixing [S ~> ppt].
+    Pressure, &     ! The pressure after a timestep of mixing [R L2 T-2 ~> Pa].
+    I_dz_int, &     ! The inverse of the distance between velocity & density points
+                    ! above and below an interface [Z-1 ~> m-1].  This is used to
+                    ! calculate N2, shear and fluxes
+    a1, &           ! a1 is the coupling between adjacent interfaces in the TKE,
+                    ! velocity, and density equations [H ~> m or kg m-2]
+    c1, &           ! c1 is used in the tridiagonal (and similar) solvers [nondim].
+    T_int, &        ! The temperature interpolated to an interface [C ~> degC].
+    Sal_int, &      ! The salinity interpolated to an interface [S ~> ppt].
+    dbuoy_dT, &     ! The partial derivative of buoyancy with changes in temperature [Z T-2 C-1 ~> m s-2 degC-1]
+    dbuoy_dS, &     ! The partial derivative of buoyancy with changes in salinity [Z T-2 S-1 ~> m s-2 ppt-1]
+    dSpV_dT, &      ! The partial derivative of specific volume with changes in temperature [R-1 C-1 ~> m3 kg-1 degC-1]
+    dSpV_dS, &      ! The partial derivative of specific volume with changes in salinity [R-1 S-1 ~> m3 kg-1 ppt-1]
+    rho_int         ! The in situ density interpolated to an interface [R ~> kg m-3]
+
   integer, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: &
     kc              ! The index map between the original
                     ! interfaces and the interfaces with massless layers
                     ! merged into nearby massive layers.
+  integer, dimension(SZI_(G),SZJ_(G)) :: &
+    nzc_2d             ! The number of interfaces in the column after massless layers
+                    ! have been merged into nearby massive layers.
 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
     dz_3d, &    ! Vertical distance between interface heights [Z ~> m].
@@ -202,12 +224,18 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
   real :: f2    ! The squared Coriolis parameter of each column [T-2 ~> s-2].
   real :: surface_pres  ! The top surface pressure [R L2 T-2 ~> Pa].
-
+  real :: b1            ! The inverse of the pivot in the tridiagonal equations [H-1 ~> m-1 or m2 kg-1].
+  real :: d1            ! 1 - c1 in the tridiagonal equations [nondim]
+  real :: bd1           ! A term in the denominator of b1 [H ~> m or kg m-2].
   real :: dz_in_lay     !   The running sum of the thickness in a layer [H ~> m or kg m-2]
   real :: k0dt          ! The background diffusivity times the timestep [H Z ~> m2 or kg m-1]
+  real :: gR0           ! A conversion factor from H to pressure, Rho_0 times g in Boussinesq
+                        ! mode, or just g when non-Boussinesq [R L2 T-2 H-1 ~> kg m-2 s-2 or m s-2].
+  real :: g_R0          ! g_R0 is a rescaled version of g/Rho [Z R-1 T-2 ~> m4 kg-1 s-2].
   real :: dz_massless   ! A layer thickness that is considered massless [H ~> m or kg m-2]
   logical :: use_temperature  !  If true, temperature and salinity have been
                         ! allocated and are being used as state variables.
+  integer, dimension(3,2) :: EOSdom    !< 1-based EOS domain density deriv calculations
   integer :: is, ie, js, je, i, j, k, nz, nzc
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
@@ -215,6 +243,8 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   use_temperature = associated(tv%T)
 
   k0dt = dt*CS%kappa_0
+  gR0 = GV%H_to_RZ * GV%g_Earth
+  g_R0 = GV%g_Earth_Z_T2 / GV%Rho0
   dz_massless = 0.1*sqrt((US%Z_to_m*GV%m_to_H)*k0dt)
 
   if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(:,:,:) = 0.0
@@ -234,18 +264,23 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
 
   ! Locals that aren't initialized to anything in the loop are allocated on the device to avoid repeated transfers.
-  ! Note that some of these names ( i.e the ones ending in lay) should be changed now that the loop is columnar
   !$omp target enter data map(alloc: h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, Idz)
+  !$omp &                 kf, kc, kappa, Idz, dz_3d)
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
   !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
+  
+  ! TEST: new locals that need to be allocated to split density deriv calc from 
+  ! column calculation
+  !$omp target enter data map(alloc: dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, &
+  !$omp &                  pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
 
   ! Calculate thicknesses outside of main kernel
   ! Convert layer thicknesses into geometric thickness in height units.
   call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload = .true. ) 
 
-  !$omp target teams distribute parallel do collapse(2) private(nzc, f2, i, j, surface_pres, dz_in_lay)  
+  !$omp target teams distribute parallel do collapse(2) &
+  !$omp &   private(nzc, surface_pres, dz_in_lay, b1, d1, bd1)
   do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
 
     ! Store a transposed version of the initial arrays.
@@ -258,6 +293,10 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
         ! Zero out the thicknesses of all layers, even if they are unused.
         h_lay(i,j,k) = 0.0 ; dz_lay(i,j,k) = 0.0 ; u0xdz(i,j,k) = 0.0 ; v0xdz(i,j,k) = 0.0
         T0xdz(i,j,k) = 0.0 ; S0xdz(i,j,k) = 0.0
+
+        ! Zero out Final u,v,t, and S arrays to prevent passing uninitialized values
+        u(i,j,k) = 0.0 ; v(i,j,k) = 0.0 ; T(i,j,k) = 0.0 ; Sal(i,j,k) = 0.0
+        T_int(i,j,k) = 0.0 ; Sal_int(i,j,k) = 0.0 ; rho_int(i,j,k) = 0.0
 
         ! Add a new layer if this one has mass.
 !          if ((h_lay(nzc) > 0.0) .and. (h_1d(k) > dz_massless)) nzc = nzc+1
@@ -314,26 +353,128 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       nzc = nz
       do k=1,nzc+1 ; kc(i,j,k) = k ; kf(i,j,k) = 0.0 ; enddo
     endif
+
+    ! Get inverse of layer thicknesses for applying background diffisivity
+    !   Set up I_dz_int as the inverse of the distance between
+    ! adjacent layer centers.
+    I_dz_int(i,j,1) = 2.0 / dz_lay(i,j,1)
+    do K=2,nzc
+      I_dz_int(i,j,K) = 2.0 / (dz_lay(i,j,K-1) + dz_lay(i,j,K))
+    enddo
+    I_dz_int(i,j,nzc+1) = 2.0 / dz_lay(i,j,nzc)
+
+    ! Get velocities, thickness, and thermodynamic tracers after background diffusion step
+    ! Determine the velocities and thicknesses after eliminating massless
+    ! layers and applying a time-step of background diffusion.
+    if (nzc > 1) then
+      a1(i,j,2) = k0dt*I_dz_int(i,j,2)
+      b1 = 1.0 / (h_lay(i,j,1) + a1(i,j,2))
+      u(i,j,1) = b1 * u0xdz(i,j,1) ; v(i,j,1) = b1 * v0xdz(i,j,1)
+      T(i,j,1) = b1 * T0xdz(i,j,1) ; Sal(i,j,1) = b1 * S0xdz(i,j,1)
+      c1(i,j,2) = a1(i,j,2) * b1 ; d1 = h_lay(i,j,1) * b1 ! = 1 - c1
+      do k=2,nzc-1
+        bd1 = h_lay(i,j,k) + d1*a1(i,j,k)
+        a1(i,j,k+1) = k0dt*I_dz_int(i,j,k+1)
+        b1 = 1.0 / (bd1 + a1(i,j,k+1))
+        u(i,j,k) = b1 * (u0xdz(i,j,k) + a1(i,j,k)*u(i,j,k-1))
+        v(i,j,k) = b1 * (v0xdz(i,j,k) + a1(i,j,k)*v(i,j,k-1))
+        T(i,j,k) = b1 * (T0xdz(i,j,k) + a1(i,j,k)*T(i,j,k-1))
+        Sal(i,j,k) = b1 * (S0xdz(i,j,k) + a1(i,j,k)*Sal(i,j,k-1))
+        c1(i,j,k+1) = a1(i,j,k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
+      enddo
+      ! rho or T and S have insulating boundary conditions, u & v use no-slip
+      ! bottom boundary conditions (if kappa0 > 0).
+      ! For no-slip bottom boundary conditions
+      b1 = 1.0 / ((h_lay(i,j,nzc) + d1*a1(i,j,nzc)) + k0dt*I_dz_int(i,j,nzc+1))
+      u(i,j,nzc) = b1 * (u0xdz(i,j,nzc) + a1(i,j,nzc)*u(i,j,nzc-1))
+      v(i,j,nzc) = b1 * (v0xdz(i,j,nzc) + a1(i,j,nzc)*v(i,j,nzc-1))
+      ! For insulating boundary conditions
+      b1 = 1.0 / (h_lay(i,j,nzc) + d1*a1(i,j,nzc))
+      T(i,j,nzc) = b1 * (T0xdz(i,j,nzc) + a1(i,j,nzc)*T(i,j,nzc-1))
+      Sal(i,j,nzc) = b1 * (S0xdz(i,j,nzc) + a1(i,j,nzc)*Sal(i,j,nzc-1))
+      do k=nzc-1,1,-1
+        u(i,j,k) = u(i,j,k) + c1(i,j,k+1)*u(i,j,k+1) ; v(i,j,k) = v(i,j,k) + c1(i,j,k+1)*v(i,j,k+1)
+        T(i,j,k) = T(i,j,k) + c1(i,j,k+1)*T(i,j,k+1) ; Sal(i,j,k) = Sal(i,j,k) + c1(i,j,k+1)*Sal(i,j,k+1)
+      enddo
+    else
+      ! This is correct, but probably unnecessary.
+      b1 = 1.0 / (h_lay(i,j,1) + k0dt*I_dz_int(i,j,2))
+      u(i,j,1) = b1 * u0xdz(i,j,1) ; v(i,j,1) = b1 * v0xdz(i,j,1)
+      b1 = 1.0 / h_lay(i,j,1)
+      T(i,j,1) = b1 * T0xdz(i,j,1) ; Sal(i,j,1) = b1 * S0xdz(i,j,1)
+    endif
+
+    ! Get T,S and pressure for calculating dbuoy_dT and dbuoy_dS 
+    surface_pres = 0.0 ; if (associated(p_surf)) surface_pres = p_surf(i,j)
+    if (use_temperature) then
+      pressure(i,j,1) = surface_pres
+      do k=2,nzc
+        pressure(i,j,k) = pressure(i,j,k-1) + gR0*h_lay(i,j,k-1)
+        T_int(i,j,k) = 0.5*(T(i,j,k-1) + T(i,j,k))
+        Sal_int(i,j,k) = 0.5*(Sal(i,j,k-1) + Sal(i,j,k))
+      enddo
+    endif
+
+    ! Save the number of collapsed layers for each column
+    nzc_2d(i,j) = nzc
+
+  endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
+
+
+  ! Get dbouy_Dt and dbouy_DS
+  ! Calculate thermodynamic coefficients and an initial estimate of N2.
+  if (use_temperature) then
+    if (GV%Boussinesq .or. GV%semi_Boussinesq) then
+      EOSdom(1,1) = is ; EOSdom(1,2) = ie
+      EOSdom(2,1) = js ; EOSdom(2,2) = je
+      ! NOTE: This is incorrect, but unsure how to vary this index per i/j
+      EOSdom(3,1) = 2 ; EOSdom(3,2) = nz
+      call calculate_density_derivs(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
+                                    tv%eqn_of_state, EOSdom, scale=-g_R0 )
+    ! else
+      ! These should perhaps be combined into a single call to calculate the thermal expansion
+      ! and haline contraction coefficients?
+      ! call calculate_specific_vol_derivs(T_int, Sal_int, pressure, dSpV_dT, dSpV_dS, &
+      !                               tv%eqn_of_state, (/2,nzc/) )
+      ! call calculate_density(T_int, Sal_int, pressure, rho_int, tv%eqn_of_state, (/2,nzc/) )
+      ! do K=2,nzc
+      !   dbuoy_dT(i,j,K) = GV%g_Earth_Z_T2 * (rho_int(i,j,K) * dSpV_dT(K))
+      !   dbuoy_dS(i,j,K) = GV%g_Earth_Z_T2 * (rho_int(i,j,K) * dSpV_dS(K))
+      ! enddo
+    endif
+  ! elseif (GV%Boussinesq .or. GV%semi_Boussinesq) then
+  !   do K=1,nzc+1 ; dbuoy_dT(i,j,K) = -g_R0 ; dbuoy_dS(i,j,K) = 0.0 ; enddo
+  ! else
+  !   do K=1,nzc+1 ; dbuoy_dS(i,j,K) = 0.0 ; enddo
+  !   dbuoy_dT(i,j,1) = -GV%g_Earth_Z_T2 / GV%Rlay(1)
+  !   do K=2,nzc
+  !     dbuoy_dT(i,j,K) = -GV%g_Earth_Z_T2 / (0.5*(GV%Rlay(K-1) + GV%Rlay(K)))
+  !   enddo
+  !   dbuoy_dT(i,j,nzc+1) = -GV%g_Earth_Z_T2 / GV%Rlay(nzc)
+  endif
+
+  !$omp target teams distribute parallel do collapse(2) private( f2, i ,j )  
+  do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
+
     f2 = 0.25 * ((G%Coriolis2Bu(I,J) + G%Coriolis2Bu(I-1,J-1)) + &
                   (G%Coriolis2Bu(I,J-1) + G%Coriolis2Bu(I-1,J)))
-    surface_pres = 0.0 ; if (associated(p_surf)) surface_pres = p_surf(i,j)
 
     ! ----------------------------------------------------    I_Ld2_1d, dz_Int_1d
 
     ! Set the initial guess for kappa, here defined at interfaces.
     ! ----------------------------------------------------
-    do K=1,nzc+1
+    do K=1,nzc_2d(i,j)+1
       kappa(i,j,K) = CS%kappa_seed
     enddo
 
-    call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
-                           h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
+    call kappa_shear_column(kappa, tke, dt, nzc_2d(i,j), f2, dbuoy_dT, dbuoy_dS, &
+                           h_lay, dz_lay, I_dz_int, kappa_avg, u, v, T, Sal, &
                            tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
                            tv, CS, G, GV, US, i ,j)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
-    if (nz == nzc) then
+    if (nz == nzc_2d(i,j)) then
       do K=1,nz+1
         kappa_io(i,j,K) = kappa_avg(i,j,K)
         if (CS%all_layer_TKE_bug) then
@@ -419,6 +560,10 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp &                 kf, kc, kappa, Idz)
   !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
   !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+
+   !TEST: DELETE NEW LOCALS
+  !$omp target exit data map(delete: dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, & 
+  !$omp &                    pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
 
   if (CS%id_Kd_shear > 0) call post_data(CS%id_Kd_shear, kappa_io, CS%diag)
   if (CS%id_TKE > 0) call post_data(CS%id_TKE, tke_io, CS%diag)
@@ -717,10 +862,10 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     ! ----------------------------------------------------
       do K=1,nzc+1 ; kappa(K) = CS%kappa_seed ; enddo
 
-      call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
-                              h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
-                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv, &
-                              CS, G, GV, US, i, j)
+      ! call kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, &
+      !                         h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, &
+      !                         tke_avg, N2_init, S2_init, N2_mean, S2_mean, tv, &
+      !                         CS, G, GV, US, i, j)
     ! call cpu_clock_begin(Id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
       if (nz == nzc) then
@@ -882,8 +1027,8 @@ end subroutine Calc_kappa_shear_vertex
 
 
 !> This subroutine calculates shear-driven diffusivity and TKE in a single column
-subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_lay, &
-                              u0xdz, v0xdz, T0xdz, S0xdz, kappa_avg, tke_avg, N2_init, S2_init, &
+subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay, dz_lay, I_dz_int, &
+                              kappa_avg, u, v, T, Sal,   tke_avg, N2_init, S2_init, &
                               N2_mean, S2_mean, tv, CS, G, GV, US, i, j )
   !$omp declare target
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure.
@@ -895,22 +1040,35 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
                                            !! an interface [Z2 T-2 ~> m2 s-2].
   integer,           intent(in)    :: nzc  !< The number of active layers in the column.
   real,              intent(in)    :: f2   !< The square of the Coriolis parameter [T-2 ~> s-2].
-  real,              intent(in)    :: surface_pres  !< The surface pressure [R L2 T-2 ~> Pa].
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: hlay  !< The layer thickness [H ~> m or kg m-2]
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                      intent(in)    :: dz_lay !< The geometric layer thickness in height units [Z ~> m]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
-                     intent(in)    :: u0xdz !< The initial zonal velocity times hlay [H L T-1 ~> m2 s-1 or kg m-1 s-1]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
-                     intent(in)    :: v0xdz !< The initial meridional velocity times the
-                                            !! layer thickness [H L T-1 ~> m2 s-1 or kg m-1 s-1]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
-                     intent(in)    :: T0xdz !< The initial temperature times hlay [C H ~> degC m or degC kg m-2]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
-                     intent(in)    :: S0xdz !< The initial salinity times hlay [S H ~> ppt m or ppt kg m-2]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+                     intent(in)    :: I_dz_int !< The inverse of the distance between velocity & density
+                                               !! points above and below an interface [Z-1 ~> m-1].
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+                     intent(in)    :: dbuoy_dT !< The derivative of buoyancy with respect to temperature [H L T-2 ~> m s-2 degC-1 or m s-2 kg-1 m2]
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+                     intent(in)    :: dbuoy_dS !< The derivative of buoyancy with respect to salinity [H L T-2 ~> m s-2 ppt-1 or m s-2 kg-1 m2]
   real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: kappa_avg !< The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+                     intent(inout) :: u !< On entry, the zonal velocity after eliminating massless layers
+                                        !! and applying background diffusion; on exit, the projected
+                                        !! zonal velocity [H Z T-1 ~> m s-1]
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+                     intent(inout) :: v !< On entry, the meridional velocity after eliminating massless
+                                        !! layers and applying background diffusion; on exit, the
+                                        !! projected meridional velocity [H Z T-1 ~> m s-1]
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+                     intent(inout) :: T !< On entry, the temperature after eliminating massless layers
+                                        !! and applying background diffusion; on exit, the projected
+                                        !! temperature [H Z T-1 ~> degC]
+  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+                     intent(inout) :: Sal !< On entry, the salinity after eliminating massless layers
+                                        !! and applying background diffusion; on exit, the projected
+                                        !! salinity [H Z T-1 ~> ppt]
   real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
                      intent(out)   :: tke_avg  !< The time-weighted average of TKE [Z2 T-2 ~> m2 s-2].
   real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
@@ -932,13 +1090,14 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 
   ! Local variables
   real, dimension(75) :: &
-    u, &        ! The zonal velocity after a timestep of mixing [L T-1 ~> m s-1].
-    v, &        ! The meridional velocity after a timestep of mixing [L T-1 ~> m s-1].
     Idz, &      ! The inverse of the distance between TKE points [Z-1 ~> m-1].
-    T, &        ! The potential temperature after a timestep of mixing [C ~> degC].
-    Sal, &      ! The salinity after a timestep of mixing [S ~> ppt].
     u_test, v_test, & ! Temporary velocities [L T-1 ~> m s-1].
-    T_test, S_test ! Temporary temperatures [C ~> degC] and salinities [S ~> ppt].
+    T_test, S_test, & ! Temporary temperatures [C ~> degC] and salinities [S ~> ppt].
+    u_col, v_col, & ! Contiguous per-column copies of u(i,j,:) and v(i,j,:) used as
+                    ! input/output for calculate_projected_state, to avoid passing
+                    ! non-contiguous array sections or mismatched-rank whole arrays.
+    T_col, Sal_col, & ! Contiguous per-column copies of T(i,j,:) and Sal(i,j,:), as above.
+    hlay_col    ! A contiguous per-column copy of hlay(i,j,:), as above.
 
   real, dimension(76) :: &
     N2, &       ! The squared buoyancy frequency at an interface [T-2 ~> s-2].
@@ -949,13 +1108,12 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     dz_h_Int, & ! The ratio of the vertical distances to the thickness around an
                 ! interface [Z H-1 ~> nondim or m3 kg-1].  In non-Boussinesq mode
                 ! this is the specific volume, otherwise it is a scaling factor.
-    I_dz_int, & ! The inverse of the distance between velocity & density points
-                ! above and below an interface [Z-1 ~> m-1].  This is used to
-                ! calculate N2, shear and fluxes.
+    I_dz_int_col, & ! A contiguous per-column copy of I_dz_int(i,j,:), the inverse of
+                ! the distance between velocity & density points above and below an
+                ! interface [Z-1 ~> m-1], used as above for calculate_projected_state.
+    dbuoy_dT_col, & ! A contiguous per-column copy of dbuoy_dT(i,j,:), as above.
+    dbuoy_dS_col, & ! A contiguous per-column copy of dbuoy_dS(i,j,:), as above.
     S2, &       ! The squared shear at an interface [T-2 ~> s-2].
-    a1, &       ! a1 is the coupling between adjacent interfaces in the TKE,
-                ! velocity, and density equations [H ~> m or kg m-2]
-    c1, &       ! c1 is used in the tridiagonal (and similar) solvers [nondim].
     k_src, &    ! The shear-dependent source term in the kappa equation [T-1 ~> s-1]
     kappa_src, & ! The shear-dependent source term in the kappa equation [T-1 ~> s-1]
     kappa_out, & ! The kappa that results from the kappa equation [H Z T-1 ~> m2 s-1 or Pa s]
@@ -967,13 +1125,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     tke_col, &   ! A contiguous per-column copy of tke(i,j,:) used as an output from
                  ! find_kappa_tke, to avoid passing a non-contiguous array section.
     pressure, & ! The pressure at an interface [R L2 T-2 ~> Pa].
-    T_int, &    ! The temperature interpolated to an interface [C ~> degC].
-    Sal_int, &  ! The salinity interpolated to an interface [S ~> ppt].
-    dbuoy_dT, & ! The partial derivative of buoyancy with changes in temperature [Z T-2 C-1 ~> m s-2 degC-1]
-    dbuoy_dS, & ! The partial derivative of buoyancy with changes in salinity [Z T-2 S-1 ~> m s-2 ppt-1]
-    dSpV_dT, &  ! The partial derivative of specific volume with changes in temperature [R-1 C-1 ~> m3 kg-1 degC-1]
-    dSpV_dS, &  ! The partial derivative of specific volume with changes in salinity [R-1 S-1 ~> m3 kg-1 ppt-1]
-    rho_int, &  ! The in situ density interpolated to an interface [R ~> kg m-3]
     I_L2_bdry, &   ! The inverse of the square of twice the harmonic mean
                    ! distance to the top and bottom boundaries [H-1 Z-1 ~> m-2 or m kg-1].
     K_Q, &         ! Diffusivity divided by TKE [H T Z-1 ~> s or kg s m-3]
@@ -989,9 +1140,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 
   real :: dist_from_bot ! The distance from the bottom surface [Z ~> m].
   real :: h_from_bot    ! The total thickness below and interface [H ~> m or kg m-2]
-  real :: b1            ! The inverse of the pivot in the tridiagonal equations [H-1 ~> m-1 or m2 kg-1].
-  real :: bd1           ! A term in the denominator of b1 [H ~> m or kg m-2].
-  real :: d1            ! 1 - c1 in the tridiagonal equations [nondim]
   real :: gR0           ! A conversion factor from H to pressure, Rho_0 times g in Boussinesq
                         ! mode, or just g when non-Boussinesq [R L2 T-2 H-1 ~> kg m-2 s-2 or m s-2].
   real :: g_R0          ! g_R0 is a rescaled version of g/Rho [Z R-1 T-2 ~> m4 kg-1 s-2].
@@ -1051,16 +1199,12 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
 
   ! Set up Idz as the inverse of layer thicknesses.
   do k=1,nzc ; Idz(k) = 1.0 / dz_lay(i,j,k) ; enddo
-  !   Set up I_dz_int as the inverse of the distance between
-  ! adjacent layer centers.
-  I_dz_int(1) = 2.0 / dz_lay(i,j,1)
+
   dist_from_top(1) = 0.0 ; h_from_top(1) = 0.0
   do K=2,nzc
-    I_dz_int(K) = 2.0 / (dz_lay(i,j,K-1) + dz_lay(i,j,K))
     dist_from_top(K) = dist_from_top(K-1) + dz_lay(i,j,K-1)
     h_from_top(K) = h_from_top(K-1) + hlay(i,j,K-1)
   enddo
-  I_dz_int(nzc+1) = 2.0 / dz_lay(i,j,nzc)
 
   ! Find the inverse of the squared distances from the boundaries.
   dist_from_bot = 0.0 ; h_from_bot = 0.0
@@ -1073,46 +1217,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     ! reduce the distance by a factor of "lz_rescale"
     I_L2_bdry(K) = I_lz_rescale_sqr*I_L2_bdry(K)
   enddo
-
-  !   Determine the velocities and thicknesses after eliminating massless
-  ! layers and applying a time-step of background diffusion.
-  if (nzc > 1) then
-    a1(2) = k0dt*I_dz_int(2)
-    b1 = 1.0 / (hlay(i,j,1) + a1(2))
-    u(1) = b1 * u0xdz(i,j,1) ; v(1) = b1 * v0xdz(i,j,1)
-    T(1) = b1 * T0xdz(i,j,1) ; Sal(1) = b1 * S0xdz(i,j,1)
-    c1(2) = a1(2) * b1 ; d1 = hlay(i,j,1) * b1 ! = 1 - c1
-    do k=2,nzc-1
-      bd1 = hlay(i,j,k) + d1*a1(k)
-      a1(k+1) = k0dt*I_dz_int(k+1)
-      b1 = 1.0 / (bd1 + a1(k+1))
-      u(k) = b1 * (u0xdz(i,j,k) + a1(k)*u(k-1))
-      v(k) = b1 * (v0xdz(i,j,k) + a1(k)*v(k-1))
-      T(k) = b1 * (T0xdz(i,j,k) + a1(k)*T(k-1))
-      Sal(k) = b1 * (S0xdz(i,j,k) + a1(k)*Sal(k-1))
-      c1(k+1) = a1(k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
-    enddo
-    ! rho or T and S have insulating boundary conditions, u & v use no-slip
-    ! bottom boundary conditions (if kappa0 > 0).
-    ! For no-slip bottom boundary conditions
-    b1 = 1.0 / ((hlay(i,j,nzc) + d1*a1(nzc)) + k0dt*I_dz_int(nzc+1))
-    u(nzc) = b1 * (u0xdz(i,j,nzc) + a1(nzc)*u(nzc-1))
-    v(nzc) = b1 * (v0xdz(i,j,nzc) + a1(nzc)*v(nzc-1))
-    ! For insulating boundary conditions
-    b1 = 1.0 / (hlay(i,j,nzc) + d1*a1(nzc))
-    T(nzc) = b1 * (T0xdz(i,j,nzc) + a1(nzc)*T(nzc-1))
-    Sal(nzc) = b1 * (S0xdz(i,j,nzc) + a1(nzc)*Sal(nzc-1))
-    do k=nzc-1,1,-1
-      u(k) = u(k) + c1(k+1)*u(k+1) ; v(k) = v(k) + c1(k+1)*v(k+1)
-      T(k) = T(k) + c1(k+1)*T(k+1) ; Sal(k) = Sal(k) + c1(k+1)*Sal(k+1)
-    enddo
-  else
-    ! This is correct, but probably unnecessary.
-    b1 = 1.0 / (hlay(i,j,1) + k0dt*I_dz_int(2))
-    u(1) = b1 * u0xdz(i,j,1) ; v(1) = b1 * v0xdz(i,j,1)
-    b1 = 1.0 / hlay(i,j,1)
-    T(1) = b1 * T0xdz(i,j,1) ; Sal(1) = b1 * S0xdz(i,j,1)
-  endif
 
   ! This uses half the harmonic mean of thicknesses to provide two estimates
   ! of the boundary between cells, and the inverse of the harmonic mean to
@@ -1149,39 +1253,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     enddo
   endif
 
-  ! Calculate thermodynamic coefficients and an initial estimate of N2.
-  if (use_temperature) then
-    pressure(1) = surface_pres
-    do K=2,nzc
-      pressure(K) = pressure(K-1) + gR0*hlay(i,j,K-1)
-      T_int(K) = 0.5*(T(K-1) + T(K))
-      Sal_int(K) = 0.5*(Sal(K-1) + Sal(K))
-    enddo
-    if (GV%Boussinesq .or. GV%semi_Boussinesq) then
-      call calculate_density_derivs_dev(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
-                                    tv%eqn_of_state, (/2,nzc/), scale=-g_R0 )
-    else
-      ! These should perhaps be combined into a single call to calculate the thermal expansion
-      ! and haline contraction coefficients?
-      ! call calculate_specific_vol_derivs(T_int, Sal_int, pressure, dSpV_dT, dSpV_dS, &
-      !                               tv%eqn_of_state, (/2,nzc/) )
-      ! call calculate_density(T_int, Sal_int, pressure, rho_int, tv%eqn_of_state, (/2,nzc/) )
-      do K=2,nzc
-        dbuoy_dT(K) = GV%g_Earth_Z_T2 * (rho_int(K) * dSpV_dT(K))
-        dbuoy_dS(K) = GV%g_Earth_Z_T2 * (rho_int(K) * dSpV_dS(K))
-      enddo
-    endif
-  elseif (GV%Boussinesq .or. GV%semi_Boussinesq) then
-    do K=1,nzc+1 ; dbuoy_dT(K) = -g_R0 ; dbuoy_dS(K) = 0.0 ; enddo
-  else
-    do K=1,nzc+1 ; dbuoy_dS(K) = 0.0 ; enddo
-    dbuoy_dT(1) = -GV%g_Earth_Z_T2 / GV%Rlay(1)
-    do K=2,nzc
-      dbuoy_dT(K) = -GV%g_Earth_Z_T2 / (0.5*(GV%Rlay(k-1) + GV%Rlay(k)))
-    enddo
-    dbuoy_dT(nzc+1) = -GV%g_Earth_Z_T2 / GV%Rlay(nzc)
-  endif
-
   ! N2_debug(1) = 0.0 ; N2_debug(nzc+1) = 0.0
   ! do K=2,nzc
   !   N2_debug(K) = max((dbuoy_dT(K) * (T0xdz(k-1)*Idz(k-1) - T0xdz(k)*Idz(k)) + &
@@ -1189,9 +1260,22 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
   !                      I_dz_int(K), 0.0)
   ! enddo
 
+  ! Build contiguous per-column copies of the inputs to calculate_projected_state, to
+  ! avoid passing non-contiguous array sections or mismatched-rank whole arrays.
+  do K=1,nzc
+    u_col(K) = u(i,j,K) ; v_col(K) = v(i,j,K) ; T_col(K) = T(i,j,K) ; Sal_col(K) = Sal(i,j,K)
+    hlay_col(K) = hlay(i,j,K)
+  enddo
+  do K=1,nzc+1
+    I_dz_int_col(K) = I_dz_int(i,j,K)
+    dbuoy_dT_col(K) = dbuoy_dT(i,j,K) ; dbuoy_dS_col(K) = dbuoy_dS(i,j,K)
+  enddo
+  do K=1,nzc+1 ; kappa_col(K) = kappa(i,j,K) ; enddo
+
   ! This call just calculates N2 and S2.
-  call calculate_projected_state(kappa, u, v, T, Sal, 0.0, nzc, hlay, I_dz_int, dbuoy_dT, dbuoy_dS, &
-                                 CS%vel_underflow, u, v, T, Sal, N2, S2, GV, US)
+  call calculate_projected_state(kappa_col, u_col, v_col, T_col, Sal_col, 0.0, nzc, hlay_col, I_dz_int_col, &
+                                 dbuoy_dT_col, dbuoy_dS_col, CS%vel_underflow, u_col, v_col, T_col, Sal_col, &
+                                 N2, S2, GV, US)
   do K=1,nzc+1
     N2_init(i,j,K) = N2(K)
     S2_init(i,j,K) = S2(K)
@@ -1208,7 +1292,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     local_src_avg(K) = 0.0
     ! Use the grid spacings to scale errors in the source.
     if ( h_Int(K) > 0.0 ) &
-      local_src_avg(K) = 0.1 * k0dt * I_dz_int(K) / h_Int(K)
+      local_src_avg(K) = 0.1 * k0dt * I_dz_int_col(K) / h_Int(K)
   enddo
 
 ! call cpu_clock_end(id_clock_setup)
@@ -1261,8 +1345,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
         ! timestep is found long before the minimum is reached, so the
         ! value of max_KS_it may be unimportant, especially if it is large
         ! enough.
-        call calculate_projected_state(kappa_out, u, v, T, Sal, 0.5*dt_test, nzc, hlay(i,j,:), I_dz_int, &
-                                       dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, &
+        call calculate_projected_state(kappa_out, u_col, v_col, T_col, Sal_col, 0.5*dt_test, nzc, hlay_col, &
+                                       I_dz_int_col, dbuoy_dT_col, dbuoy_dS_col, CS%vel_underflow, u_test, v_test, &
                                        T_test, S_test, N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
         valid_dt = .true.
         Idtt = 1.0 / dt_test
@@ -1294,8 +1378,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
       if ((dt_test < dt_rem) .and. valid_dt) then
         dt_inc = 0.5*dt_test
         do itt_dt=1,dt_refinements
-          call calculate_projected_state(kappa_out, u, v, T, Sal, 0.5*(dt_test+dt_inc), nzc, hlay(i,j,:), &
-                   I_dz_int, dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, T_test, S_test, &
+          call calculate_projected_state(kappa_out, u_col, v_col, T_col, Sal_col, 0.5*(dt_test+dt_inc), nzc, &
+                   hlay_col, I_dz_int_col, dbuoy_dT_col, dbuoy_dS_col, CS%vel_underflow, u_test, v_test, T_test, S_test, &
                    N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
           valid_dt = .true.
           Idtt = 1.0 / (dt_test+dt_inc)
@@ -1344,8 +1428,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     ! call cpu_clock_end(id_clock_avg)
     else
     ! call cpu_clock_begin(id_clock_project)
-      call calculate_projected_state(kappa_out, u, v, T, Sal, dt_now, nzc, hlay(i,j,:), I_dz_int, &
-                                     dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, &
+      call calculate_projected_state(kappa_out, u_col, v_col, T_col, Sal_col, dt_now, nzc, hlay_col, I_dz_int_col, &
+                                     dbuoy_dT_col, dbuoy_dS_col, CS%vel_underflow, u_test, v_test, &
                                      T_test, S_test, N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
     ! call cpu_clock_end(id_clock_project)
 
@@ -1363,8 +1447,8 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
       enddo
 
     ! call cpu_clock_begin(id_clock_project)
-      call calculate_projected_state(kappa_mid, u, v, T, Sal, dt_now, nzc, hlay(i,j,:), I_dz_int, &
-                                     dbuoy_dT, dbuoy_dS, CS%vel_underflow, u_test, v_test, &
+      call calculate_projected_state(kappa_mid, u_col, v_col, T_col, Sal_col, dt_now, nzc, hlay_col, I_dz_int_col, &
+                                     dbuoy_dT_col, dbuoy_dS_col, CS%vel_underflow, u_test, v_test, &
                                      T_test, S_test, N2, S2, GV, US, ks_int=ks_kappa, ke_int=ke_kappa)
     ! call cpu_clock_end(id_clock_project)
 
@@ -1390,15 +1474,19 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, surface_pres, hlay, dz_la
     if (dt_rem > 0.0) then
       ! Update the values of u, v, T, Sal, N2, and S2 for the next iteration.
     ! call cpu_clock_begin(id_clock_project)
-      call calculate_projected_state(kappa_mid, u, v, T, Sal, dt_now, nzc, hlay(i,j,:), I_dz_int, &
-                                     dbuoy_dT, dbuoy_dS, CS%vel_underflow, u, v, T, Sal, N2, S2, &
-                                     GV, US)
+      call calculate_projected_state(kappa_mid, u_col, v_col, T_col, Sal_col, dt_now, nzc, hlay_col, I_dz_int_col, &
+                                     dbuoy_dT_col, dbuoy_dS_col, CS%vel_underflow, u_col, v_col, T_col, Sal_col, &
+                                     N2, S2, GV, US)
     ! call cpu_clock_end(id_clock_project)
     endif
 
     if (dt_rem <= 0.0) exit
 
   enddo ! end itt loop
+
+  do K=1,nzc
+    u(i,j,K) = u_col(K) ; v(i,j,K) = v_col(K) ; T(i,j,K) = T_col(K) ; Sal(i,j,K) = Sal_col(K)
+  enddo
 
 end subroutine kappa_shear_column
 
@@ -1575,7 +1663,7 @@ subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_b
   real, dimension(75) :: &
     aQ, &       ! aQ is the coupling between adjacent interfaces in the TKE equations [H T-1 ~> m s-1 or kg m-2 s-1]
     dQdz        ! Half the partial derivative of TKE with depth [Z T-2 ~> m s-2].
-  real, dimension(76  ) :: &
+  real, dimension(76 ) :: &
     dK, &         ! The change in kappa [H Z T-1 ~> m2 s-1 or Pa s].
     dQ, &         ! The change in TKE [Z2 T-2 ~> m2 s-2].
     cQ, cK, &     ! cQ and cK are the upward influences in the tridiagonal and
