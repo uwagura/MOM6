@@ -452,10 +452,15 @@ subroutine set_diffusivity(u, v, h, u_h, v_h, tv, fluxes, optics, visc, dt, Kd_i
       ! Note that tv%SpV_AvG is used in thickness_to_dz
       !$omp target enter data map(to: u_h, v_h, h, tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg, &
       !$omp & fluxes%p_surf)
-      !$omp target enter data map(alloc: visc%Kd_shear, visc%Kv_shear, visc%TKE_turb)
+      !   visc%Kv_shear is deliberately not mapped here, for the same reason as visc%Kv_shear_Bu
+      ! in the branch above: set_visc_init already gave it a persistent target enter data, so
+      ! mapping it again only raises its reference count and the exit data below decrements it
+      ! without ever copying anything back.  Its host copy gets an explicit target update instead.
+      !$omp target enter data map(alloc: visc%Kd_shear, visc%TKE_turb)
       call calculate_kappa_shear(u_h, v_h, h, tv, fluxes%p_surf, visc%Kd_shear, visc%TKE_turb, &
                                  visc%Kv_shear, dt, G, GV, US, CS%kappaShear_CSp)
-      !$omp target exit data map(from: visc%Kd_shear, visc%Kv_shear, visc%TKE_turb)
+      !$omp target update from(visc%Kv_shear) if (associated(visc%Kv_shear))
+      !$omp target exit data map(from: visc%Kd_shear, visc%TKE_turb)
       !$omp target exit data map(release: u_h, v_h, h, tv, tv%T, tv%S, tv%eqn_of_state, tv%SpV_avg, &
       !$omp & fluxes%p_surf)
       if (CS%debug) then
