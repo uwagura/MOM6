@@ -478,7 +478,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     call kappa_shear_column(kappa, tke, dt, nzc_2d(i,j), f2, dbuoy_dT, dbuoy_dS, &
                            h_lay, dz_lay, I_dz_int, kappa_avg, u, v, T, Sal, &
                            tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                           tv, CS, G, GV, US, i ,j)
+                           CS, GV, US, G%isd, G%ied, G%jsd, G%jed, i ,j)
 
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
@@ -1037,64 +1037,70 @@ end subroutine Calc_kappa_shear_vertex
 !> This subroutine calculates shear-driven diffusivity and TKE in a single column
 subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay, dz_lay, I_dz_int, &
                               kappa_avg, u, v, T, Sal,   tke_avg, N2_init, S2_init, &
-                              N2_mean, S2_mean, tv, CS, G, GV, US, i, j )
+                              N2_mean, S2_mean, CS, GV, US, id_lo, id_hi, jd_lo, jd_hi, i, j )
   !$omp declare target
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure.
-  type(ocean_grid_type),   intent(in)    :: G  !< The ocean's horizontal grid structure.
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+  !   The horizontal bounds of the caller's arrays are passed in rather than being taken from
+  ! SZI_(G)/SZJ_(G), so that this routine can serve both the tracer-point driver (which passes
+  ! isd/ied/jsd/jed) and the vertex driver (which passes IsdB/IedB/JsdB/JedB) without either one
+  ! having to declare its arrays at the other's staggering.  In symmetric memory IsdB = isd-1, so
+  ! a B-grid array passed to an SZI_/SZJ_ dummy would be silently misaligned by sequence
+  ! association.  This routine never refers to the grid other than through these bounds.
+  integer,           intent(in)    :: id_lo !< The lower i-bound of the caller's horizontal arrays.
+  integer,           intent(in)    :: id_hi !< The upper i-bound of the caller's horizontal arrays.
+  integer,           intent(in)    :: jd_lo !< The lower j-bound of the caller's horizontal arrays.
+  integer,           intent(in)    :: jd_hi !< The upper j-bound of the caller's horizontal arrays.
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(inout) :: kappa !< The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: tke  !< The Turbulent Kinetic Energy per unit mass at
                                            !! an interface [Z2 T-2 ~> m2 s-2].
   integer,           intent(in)    :: nzc  !< The number of active layers in the column.
   real,              intent(in)    :: f2   !< The square of the Coriolis parameter [T-2 ~> s-2].
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)), &
                      intent(in)    :: hlay  !< The layer thickness [H ~> m or kg m-2]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)), &
                      intent(in)    :: dz_lay !< The geometric layer thickness in height units [Z ~> m]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(in)    :: I_dz_int !< The inverse of the distance between velocity & density
                                                !! points above and below an interface [Z-1 ~> m-1].
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(in)    :: dbuoy_dT !< The derivative of buoyancy with respect to temperature [H L T-2 ~> m s-2 degC-1 or m s-2 kg-1 m2]
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(in)    :: dbuoy_dS !< The derivative of buoyancy with respect to salinity [H L T-2 ~> m s-2 ppt-1 or m s-2 kg-1 m2]
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: kappa_avg !< The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(inout) :: u !< On entry, the zonal velocity after eliminating massless layers
                                         !! and applying background diffusion; on exit, the projected
                                         !! zonal velocity [H Z T-1 ~> m s-1]
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(inout) :: v !< On entry, the meridional velocity after eliminating massless
                                         !! layers and applying background diffusion; on exit, the
                                         !! projected meridional velocity [H Z T-1 ~> m s-1]
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(inout) :: T !< On entry, the temperature after eliminating massless layers
                                         !! and applying background diffusion; on exit, the projected
                                         !! temperature [H Z T-1 ~> degC]
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(inout) :: Sal !< On entry, the salinity after eliminating massless layers
                                         !! and applying background diffusion; on exit, the projected
                                         !! salinity [H Z T-1 ~> ppt]
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: tke_avg  !< The time-weighted average of TKE [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: N2_mean  !< The time-weighted average of N2 [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: S2_mean  !< The time-weighted average of S2 [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: N2_init  !< The initial value of N2 [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZI_(G),SZJ_(G), SZK_(GV)+1), &
+  real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: S2_init  !< The initial value of S2 [Z2 T-2 ~> m2 s-2].
   real,                    intent(in)    :: dt !< Time increment [T ~> s].
-  type(thermo_var_ptrs),   intent(in)    :: tv !< A structure containing pointers to any
-                                               !! available thermodynamic fields. Absent fields
-                                               !! have NULL ptrs.
   type(Kappa_shear_CS),    pointer       :: CS !< The control structure returned by a previous
                                                !! call to kappa_shear_init.
   type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
-  integer,           intent(in)    :: i, j !< The horizontal indices of the column being processed. 
+  integer,           intent(in)    :: i, j !< The horizontal indices of the column being processed.
 
   ! Local variables
   ! In GPU builds these locals have compile-time-constant sizes so each device call uses
@@ -1185,8 +1191,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay,
   real :: k0dt          ! The background diffusivity times the timestep [H Z ~> m2 or kg m-1].
   real :: I_lz_rescale_sqr ! The inverse of a rescaling factor for L2_bdry (Lz) squared [nondim].
   logical :: valid_dt   ! If true, all levels so far exhibit acceptably small changes in k_src.
-  logical :: use_temperature  !  If true, temperature and salinity have been
-                        ! allocated and are being used as state variables.
   integer :: ks_kappa, ke_kappa  ! The k-range with nonzero kappas.
   integer :: dt_refinements ! The number of 2-fold refinements that will be used
                            ! to estimate the maximum permitted time step.  I.e.,
@@ -1213,7 +1217,6 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay,
   endif
   tol2 = 2.0*CS%kappa_tol_err
   dt_refinements = 5 ! Selected so that 1/2^dt_refinements < 1-tol_dksrc_low
-  use_temperature = .false. ; if (associated(tv%T)) use_temperature = .true.
 
 
   ! Set up Idz as the inverse of layer thicknesses.
