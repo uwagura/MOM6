@@ -416,11 +416,30 @@ subroutine set_diffusivity(u, v, h, u_h, v_h, tv, fluxes, optics, visc, dt, Kd_i
     endif
     call cpu_clock_begin(id_clock_kappaShear)
     if (CS%Vertex_shear) then
+      ! full_convection runs on the host, so T_f and S_f are mapped after it has filled them.
       call full_convection(G, GV, US, h, tv, T_f, S_f, fluxes%p_surf, &
                            kappa_dt_fill, halo=1)
 
+      ! Changes: visc%Kd_shear ;  Sets: visc%TKE_turb and visc%Kv_shear_Bu
+      ! It's ok to map tv pointers TO the device - mapping them back leads to accelerator failures
+      ! Note that tv%SpV_AvG is used in thickness_to_dz
+      !$omp target enter data map(to: u, v, h, T_f, S_f, tv, tv%T, tv%S, tv%eqn_of_state, &
+      !$omp & tv%SpV_avg, fluxes%p_surf)
+      !   These are mapped to: rather than alloc:, because calc_kappa_shear_vertex only writes
+      ! them over the compute domain while they are declared over the whole data domain; with
+      ! alloc: the halo points would come back as whatever the device buffer happened to hold.
+      !   visc%Kv_shear_Bu is deliberately not mapped here: set_visc_init already gave it a
+      ! persistent target enter data, so mapping it again would only raise its reference count and
+      ! the exit data below would decrement it without ever copying anything back.  Its host copy
+      ! is refreshed with an explicit target update instead, which the restart write, the checksum
+      ! below and vert_friction's "target update to" all depend on.
+      !$omp target enter data map(to: visc%Kd_shear, visc%TKE_turb)
       call calc_kappa_shear_vertex(u, v, h, T_f, S_f, tv, fluxes%p_surf, visc%Kd_shear, &
                                    visc%TKE_turb, visc%Kv_shear_Bu, dt, G, GV, US, CS%kappaShear_CSp)
+      !$omp target update from(visc%Kv_shear_Bu) if (associated(visc%Kv_shear_Bu))
+      !$omp target exit data map(from: visc%Kd_shear, visc%TKE_turb)
+      !$omp target exit data map(release: u, v, h, T_f, S_f, tv, tv%T, tv%S, tv%eqn_of_state, &
+      !$omp & tv%SpV_avg, fluxes%p_surf)
       if (associated(visc%Kv_shear)) visc%Kv_shear(:,:,:) = 0.0 ! needed for other parameterizations
       if (CS%debug) then
         call hchksum(visc%Kd_shear, "after calc_KS_vert visc%Kd_shear", G%HI, unscale=GV%HZ_T_to_m2_s)

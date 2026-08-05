@@ -688,6 +688,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   real :: I_hwt         ! The inverse of the sum of the adjacent masked thickness weights [H-1 ~> m-1 or m2 kg-1]
   real :: I_htot        ! The inverse of the sum of the thicknesses at adjacent vertices [H-1 ~> m-1 or m2 kg-1]
   real :: I_Prandtl     ! The inverse of the turbulent Prandtl number [nondim].
+  real :: Prandtl_turb  ! A local copy of the turbulent Prandtl number [nondim].
   real :: b1            ! The inverse of the pivot in the tridiagonal equations [H-1 ~> m-1 or m2 kg-1].
   real :: d1            ! 1 - c1 in the tridiagonal equations [nondim]
   real :: bd1           ! A term in the denominator of b1 [H ~> m or kg m-2].
@@ -717,12 +718,6 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   ! Diagnostics that should be deleted?
   isB = G%isc-1 ; ieB = G%iecB ; jsB = G%jsc-1 ; jeB = G%jecB ; nz = GV%ke
 
-  if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(:,:,:) = 0.0
-  if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(:,:,:) = 0.0
-  if (CS%id_N2_mean>0) diag_N2_mean(:,:,:) = 0.0
-  if (CS%id_S2_mean>0) diag_S2_mean(:,:,:) = 0.0
-  kappa_vertex(:,:,:) = 0.0
-
   use_temperature = associated(tv%T)
 
   k0dt =  dt*CS%kappa_0
@@ -730,43 +725,63 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   g_R0 = GV%g_Earth_Z_T2 / GV%Rho0
   dz_massless = 0.1*sqrt((US%Z_to_m*GV%m_to_H)*k0dt)
   I_Prandtl = 0.0 ; if (CS%Prandtl_turb > 0.0) I_Prandtl = 1.0 / CS%Prandtl_turb
+  Prandtl_turb = CS%Prandtl_turb
   H_tiny = 0.5 * GV%H_subroundoff
 
+  !   Everything below is computed on the device, so the locals are only allocated there and
+  ! never copied in.  The caller (MOM_set_diffusivity) owns kappa_io, tke_io and kv_io and maps
+  ! those itself.
+  !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+  !$omp target enter data map(alloc: dz_3d, h_at_u, h_at_v, kappa_vertex, &
+  !$omp &                 h_vrt, dz_vrt, u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, &
+  !$omp &                 kappa_full, tke_full)
+  !$omp target enter data map(alloc: Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
+  !$omp &                 kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+  !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
+  !$omp &                 c1, kc, kf, nzc_2d)
+
+  !   The diagnostics are zeroed over their whole extent because the loops below only cover
+  ! IsB:IeB by JsB:JeB, and kappa_vertex likewise because the vertex-to-tracer averaging reads a
+  ! halo point at I-1/J-1.
+  !$omp target teams distribute parallel do collapse(3)
+  do K=1,nz+1 ; do J=G%JsdB,G%JedB ; do I=G%IsdB,G%IedB
+    diag_N2_init(I,J,K) = 0.0 ; diag_S2_init(I,J,K) = 0.0
+    diag_N2_mean(I,J,K) = 0.0 ; diag_S2_mean(I,J,K) = 0.0
+    kappa_vertex(I,J,K) = 0.0
+  enddo ; enddo ; enddo
+
   ! Convert layer thicknesses into geometric thickness in height units.
-  call thickness_to_dz(h, tv, dz_3d, G, GV, US, halo_size=1)
+  call thickness_to_dz(h, tv, dz_3d, G, GV, US, halo_size=1, do_offload=.true.)
 
   if (CS%vertex_shear_OBC_bug) then
-    !$OMP parallel do default(shared)
-    do k=1,nz
-      do j=JsB,JeB+1 ; do I=IsB,IeB
-        h_at_u(I,j,k) = G%mask2dCu(I,j) * (h(i,j,k) + h(i+1,j,k)) * 0.5
-      enddo ; enddo
-      do J=JsB,JeB ; do i=IsB,IeB+1
-        h_at_v(i,J,k) = G%mask2dCv(i,J) * (h(i,j,k) + h(i,j+1,k)) * 0.5
-      enddo ; enddo
-    enddo
+    !$omp target teams distribute parallel do collapse(3)
+    do k=1,nz ; do j=JsB,JeB+1 ; do I=IsB,IeB
+      h_at_u(I,j,k) = G%mask2dCu(I,j) * (h(i,j,k) + h(i+1,j,k)) * 0.5
+    enddo ; enddo ; enddo
+    !$omp target teams distribute parallel do collapse(3)
+    do k=1,nz ; do J=JsB,JeB ; do i=IsB,IeB+1
+      h_at_v(i,J,k) = G%mask2dCv(i,J) * (h(i,j,k) + h(i,j+1,k)) * 0.5
+    enddo ; enddo ; enddo
   else
     ! Because G%mask2dCu(I,j) is zero if either G%mask2dT(i,j) or G%mask2dT(i+1,j) except at OBC
     ! faces, the following form give equivalent answers to those above unless OBCs are in use,
     ! although the former is clearly less complicated and costly.
-    !$OMP parallel do default(shared)
-    do k=1,nz
-      do j=JsB,JeB+1 ; do I=IsB,IeB
-        h_at_u(I,j,k) = G%mask2dCu(I,j) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j) * h(i+1,j,k)) / &
-                                          (G%mask2dT(i,j) + G%mask2dT(i+1,j) + 1.0e-36)
-      enddo ; enddo
-      do J=JsB,JeB ; do i=IsB,IeB+1
-        h_at_v(i,J,k) = G%mask2dCv(i,J) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) / &
-                                          (G%mask2dT(i,j) + G%mask2dT(i,j+1) + 1.0e-36)
-      enddo ; enddo
-    enddo
+    !$omp target teams distribute parallel do collapse(3)
+    do k=1,nz ; do j=JsB,JeB+1 ; do I=IsB,IeB
+      h_at_u(I,j,k) = G%mask2dCu(I,j) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j) * h(i+1,j,k)) / &
+                                        (G%mask2dT(i,j) + G%mask2dT(i+1,j) + 1.0e-36)
+    enddo ; enddo ; enddo
+    !$omp target teams distribute parallel do collapse(3)
+    do k=1,nz ; do J=JsB,JeB ; do i=IsB,IeB+1
+      h_at_v(i,J,k) = G%mask2dCv(i,J) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) / &
+                                        (G%mask2dT(i,j) + G%mask2dT(i,j+1) + 1.0e-36)
+    enddo ; enddo ; enddo
   endif
 
 
   ! Interpolate the various quantities to the corners, using masks.
-  !$OMP parallel do default(shared) private(I_hwt)
-  do J=JsB,JeB
-    do k=1,nz ; do I=IsB,IeB
+  !$omp target teams distribute parallel do collapse(3) private(I_hwt)
+  do k=1,nz ; do J=JsB,JeB ; do I=IsB,IeB
       u_vrt(I,J,k) = ( (u_in(I,j,k) * h_at_u(I,j,k)) + (u_in(I,j+1,k) * h_at_u(I,j+1,k)) ) / &
                   ( (h_at_u(I,j,k) + h_at_u(I,j+1,k)) + H_tiny )
       v_vrt(I,J,k) = ( (v_in(i,J,k) * h_at_v(i,J,k)) + (v_in(i+1,J,k) * h_at_v(i+1,J,k)) ) / &
@@ -796,17 +811,21 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 !      h_vrt(I,J,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))
 !      h_vrt(I,J,k) = (((h(i,j,k)**2) + (h(i+1,j+1,k)**2)) + &
 !                   ((h(i+1,j,k)**2) + (h(i,j+1,k)**2))) * I_hwt
-    enddo ; enddo
-    if (.not.use_temperature) then ; do k=1,nz ; do I=IsB,IeB
+  enddo ; enddo ; enddo ! end of the corner-interpolation loops
+
+  if (.not.use_temperature) then
+    !$omp target teams distribute parallel do collapse(3)
+    do k=1,nz ; do J=JsB,JeB ; do I=IsB,IeB
       rho_vrt(I,J,k) = GV%Rlay(k)
-    enddo ; enddo ; endif
-  enddo ! end of the corner-interpolation J-loop
+    enddo ; enddo ; enddo
+  endif
 
 !---------------------------------------
 ! Set up each column: merge massless layers, apply a timestep of background diffusion, and
 ! assemble the interface temperatures, salinities and pressures that the equation of state needs.
 !---------------------------------------
-  !$OMP parallel do default(shared) private(nzc, surface_pres, dz_in_lay, b1, d1, bd1)
+  !$omp target teams distribute parallel do collapse(2) &
+  !$omp &   private(nzc, surface_pres, dz_in_lay, b1, d1, bd1)
   do J=JsB,JeB ; do I=IsB,IeB
 
     !   The equation of state is evaluated over the whole (I,J,K) rectangle below, including land
@@ -980,7 +999,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 !---------------------------------------
 ! Work on each column.
 !---------------------------------------
-  !$OMP parallel do default(shared) private(nzc, f2)
+  !$omp target teams distribute parallel do collapse(2) private(nzc, f2)
   do J=JsB,JeB ; do I=IsB,IeB
     if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
         (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
@@ -1062,24 +1081,24 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
   ! Store the results for restarts or interpolation back to tracer points.
   if (CS%VS_viscosity_bug) then
-    !$OMP parallel do default(shared)
+    !$omp target teams distribute parallel do collapse(3)
     do K=1,nz+1 ; do J=JsB,JeB ; do I=IsB,IeB
       kappa_vertex(I,J,K) = kappa_full(I,J,K)
       tke_io(I,J,K) = G%mask2dBu(I,J) * tke_full(I,J,K)
-      kv_io(I,J,K) = ( G%mask2dBu(I,J) * kappa_vertex(I,J,K) ) * CS%Prandtl_turb
+      kv_io(I,J,K) = ( G%mask2dBu(I,J) * kappa_vertex(I,J,K) ) * Prandtl_turb
     enddo ; enddo ; enddo
   else
-    !$OMP parallel do default(shared)
+    !$omp target teams distribute parallel do collapse(3)
     do K=1,nz+1 ; do J=JsB,JeB ; do I=IsB,IeB
       kappa_vertex(I,J,K) = kappa_full(I,J,K)
       tke_io(I,J,K) = tke_full(I,J,K)
-      kv_io(I,J,K) = kappa_vertex(I,J,K) * CS%Prandtl_turb
+      kv_io(I,J,K) = kappa_vertex(I,J,K) * Prandtl_turb
     enddo ; enddo ; enddo
   endif
 
   ! Set the diffusivities in tracer columns from the values at vertices.
 
-  !$OMP parallel do default(private) shared(G,kappa_io)
+  !$omp target teams distribute parallel do collapse(2)
   do j=G%jsc,G%jec ; do i=G%isc,G%iec
     ! The turbulent length scales (and hence turbulent diffusivity) should always go to 0 at the top and bottom.
     kappa_io(i,j,1) = 0.0
@@ -1088,7 +1107,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   if (CS%VS_ThicknessMean .and. CS%VS_GeometricMean) then
     ! This conversion factor is required to allow for arbitrary fractional powers of the diffusivities.
     mks_to_HZ_T = 1.0 /  GV%HZ_T_to_MKS
-    !$OMP parallel do default(private) shared(nz,G,GV,CS,kappa_io,kappa_vertex,h_vrt)
+    !$omp target teams distribute parallel do collapse(3) &
+    !$omp &   private(h_SW, h_NE, h_NW, h_SE, I_htot)
     do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
       h_SW = 0.5 * (h_vrt(I-1,J-1,k) + h_vrt(I-1,J-1,k-1))
       h_NE = 0.5 * (h_vrt(I,J,k) + h_vrt(I,J,k-1))
@@ -1112,7 +1132,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       endif
     enddo ; enddo ; enddo
   elseif (CS%VS_ThicknessMean) then   ! Use thickness-weighted arithmetic mean diffusivities.
-    !$OMP parallel do default(private) shared(nz,G,GV,CS,kappa_io,kappa_vertex,h_vrt)
+    !$omp target teams distribute parallel do collapse(3) &
+    !$omp &   private(h_SW, h_NE, h_NW, h_SE, I_htot)
     do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
       h_SW = 0.5 * (h_vrt(I-1,J-1,k) + h_vrt(I-1,J-1,k-1))
       h_NE = 0.5 * (h_vrt(I,J,k) + h_vrt(I,J,k-1))
@@ -1125,14 +1146,14 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
              ((kappa_vertex(I-1,J,K)*h_NW) + (kappa_vertex(I,J-1,K)*h_SE))) * I_htot
     enddo ; enddo ; enddo
   elseif (CS%VS_GeometricMean) then   ! The geometic mean diffusivities are not thickness weighted.
-    !$OMP parallel do default(private) shared(nz,G,CS,kappa_io,kappa_vertex)
+    !$omp target teams distribute parallel do collapse(3)
     do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
       kappa_io(i,j,K) = G%mask2dT(i,j) * sqrt(sqrt( &
             (max(kappa_vertex(I-1,J-1,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J,K),CS%VS_GeoMean_Kdmin)) * &
             (max(kappa_vertex(I-1,J,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J-1,K),CS%VS_GeoMean_Kdmin)) ))
     enddo ; enddo ; enddo
   else   ! Use a non-thickness weighted arithmetic mean.
-    !$OMP parallel do default(private) shared(nz,G,CS,kappa_io,kappa_vertex)
+    !$omp target teams distribute parallel do collapse(3)
     do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
       kappa_io(i,j,K) = G%mask2dT(i,j) * 0.25 * &
                        ((kappa_vertex(I-1,J-1,K) + kappa_vertex(I,J,K)) +&
@@ -1140,20 +1161,54 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     enddo ; enddo ; enddo
   endif
 
+  !   The checksums and the diagnostics below all read host memory, so anything they touch has to
+  ! be brought back first.  kappa_io, tke_io and kv_io are the caller's, and are still device
+  ! resident here; the caller copies them back after this routine returns.
   if (CS%debug) then
+    !$omp target update from( diag_N2_init, diag_S2_init, kappa_io, tke_io )
     call Bchksum(diag_N2_init, "shear_vertex N2_init", G%HI, unscale=US%s_to_T**2)
     call Bchksum(diag_S2_init, "shear_vertex S2_init", G%HI, unscale=US%s_to_T**2)
     call hchksum(kappa_io, "kappa", G%HI, unscale=GV%HZ_T_to_m2_s)
     call Bchksum(tke_io, "tke", G%HI, unscale=US%Z_to_m**2*US%s_to_T**2)
   endif
 
-  if (CS%id_Kd_shear > 0) call post_data(CS%id_Kd_shear, kappa_io, CS%diag)
-  if (CS%id_TKE > 0) call post_data(CS%id_TKE, tke_io, CS%diag)
-  if (CS%id_Kd_vertex > 0) call post_data(CS%id_Kd_vertex, kappa_vertex, CS%diag)
-  if (CS%id_N2_init > 0) call post_data(CS%id_N2_init, diag_N2_init, CS%diag)
-  if (CS%id_S2_init > 0) call post_data(CS%id_S2_init, diag_S2_init, CS%diag)
-  if (CS%id_N2_mean > 0) call post_data(CS%id_N2_mean, diag_N2_mean, CS%diag)
-  if (CS%id_S2_mean > 0) call post_data(CS%id_S2_mean, diag_S2_mean, CS%diag)
+  if (CS%id_Kd_shear > 0) then
+    !$omp target update from( kappa_io )
+    call post_data(CS%id_Kd_shear, kappa_io, CS%diag)
+  endif
+  if (CS%id_TKE > 0) then
+    !$omp target update from( tke_io )
+    call post_data(CS%id_TKE, tke_io, CS%diag)
+  endif
+  if (CS%id_Kd_vertex > 0) then
+    !$omp target update from( kappa_vertex )
+    call post_data(CS%id_Kd_vertex, kappa_vertex, CS%diag)
+  endif
+  if (CS%id_N2_init > 0) then
+    !$omp target update from( diag_N2_init )
+    call post_data(CS%id_N2_init, diag_N2_init, CS%diag)
+  endif
+  if (CS%id_S2_init > 0) then
+    !$omp target update from( diag_S2_init )
+    call post_data(CS%id_S2_init, diag_S2_init, CS%diag)
+  endif
+  if (CS%id_N2_mean > 0) then
+    !$omp target update from( diag_N2_mean )
+    call post_data(CS%id_N2_mean, diag_N2_mean, CS%diag)
+  endif
+  if (CS%id_S2_mean > 0) then
+    !$omp target update from( diag_S2_mean )
+    call post_data(CS%id_S2_mean, diag_S2_mean, CS%diag)
+  endif
+
+  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
+  !$omp target exit data map(delete: dz_3d, h_at_u, h_at_v, kappa_vertex, &
+  !$omp &                 h_vrt, dz_vrt, u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, &
+  !$omp &                 kappa_full, tke_full)
+  !$omp target exit data map(delete: Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
+  !$omp &                 kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+  !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
+  !$omp &                 c1, kc, kf, nzc_2d)
 
 end subroutine Calc_kappa_shear_vertex
 
