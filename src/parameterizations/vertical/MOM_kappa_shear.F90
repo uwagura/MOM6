@@ -119,6 +119,8 @@ type, public :: Kappa_shear_CS ; private
                              !! restrictive check.
 !  logical :: layer_stagger = .false. ! If true, do the calculations centered at
                              !  layers, rather than the interfaces.
+  integer :: niblock         !< The i block size used in the kappa shear calculations [nondim].
+  integer :: njblock         !< The j block size used in the kappa shear calculations [nondim].
   logical :: debug = .false. !< If true, write verbose debugging messages.
   type(diag_ctrl), pointer :: diag => NULL() !< A structure that is used to
                              !! regulate the timing of diagnostic output.
@@ -2425,6 +2427,17 @@ function kappa_shear_init(Time, G, GV, US, param_file, diag, CS)
   logical :: enable_bugs  ! If true, the defaults for recently added bug-fix flags are set to
                           ! recreate the bugs, or if false bugs are only used if actively selected.
   logical :: just_read ! If true, this module is not used, so only read the parameters.
+#ifdef __NVCOMPILER_OPENMP_GPU
+  !   On the device the whole domain is taken as a single block, so that every column is an
+  ! independent task in one kernel launch.
+  integer, parameter :: default_niblock = 0 !< Default i block size, 0 being the full domain [nondim].
+  integer, parameter :: default_njblock = 0 !< Default j block size, 0 being the full domain [nondim].
+#else
+  !   A block size of 1 in both horizontal directions reduces the per-column working arrays to a
+  ! single column, which is how this scheme is posed on the CPU.
+  integer, parameter :: default_niblock = 1 !< Default i block size [nondim].
+  integer, parameter :: default_njblock = 1 !< Default j block size [nondim].
+#endif
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
   character(len=40)  :: mdl = "MOM_kappa_shear"  ! This module's name.
@@ -2458,6 +2471,20 @@ function kappa_shear_init(Time, G, GV, US, param_file, diag, CS)
                  "If true, do the calculations of the shear-driven mixing "//&
                  "at the cell vertices (i.e., the vorticity points).", &
                  default=.false., do_not_log=just_read)
+  call get_param(param_file, mdl, "KAPPA_SHEAR_NIBLOCK", CS%niblock, &
+                 "The i-direction block size used to hold the per-column working arrays in the "//&
+                 "shear-driven mixing calculations.  The default 0 setting dynamically uses the "//&
+                 "full computational domain width.", &
+                 default=default_niblock, layoutParam=.true.)
+  call get_param(param_file, mdl, "KAPPA_SHEAR_NJBLOCK", CS%njblock, &
+                 "The j-direction block size used to hold the per-column working arrays in the "//&
+                 "shear-driven mixing calculations.  The default 0 setting dynamically uses the "//&
+                 "full computational domain width.", &
+                 default=default_njblock, layoutParam=.true.)
+  if (CS%niblock < 0) call MOM_error(FATAL, "KAPPA_SHEAR_NIBLOCK must be nonnegative; "//&
+                                            "use 0 to select the full computational domain.")
+  if (CS%njblock < 0) call MOM_error(FATAL, "KAPPA_SHEAR_NJBLOCK must be nonnegative; "//&
+                                            "use 0 to select the full computational domain.")
   call get_param(param_file, mdl, "ENABLE_BUGS_BY_DEFAULT", enable_bugs, &
                  default=.true., do_not_log=.true.)  ! This is logged from MOM.F90.
   call get_param(param_file, mdl, "VERTEX_SHEAR_VISCOSITY_BUG", CS%VS_viscosity_bug, &
