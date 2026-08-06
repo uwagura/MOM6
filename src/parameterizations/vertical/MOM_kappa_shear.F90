@@ -686,12 +686,22 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     dz_3d           ! Vertical distance between interface heights [Z ~> m].
   real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: &
     kappa_vertex    ! Diffusivity at interfaces and vertices [H Z T-1 ~> m2 s-1 or Pa s]
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)) :: &
+  !   h_at_u and h_at_v are the reason consecutive blocks overlap: the corner interpolation below
+  ! reads h_at_u at jj+1 and h_at_v at ii+1.  Following MOM_isopycnal_slopes, they are declared at
+  ! exactly the requested block size and the extra element is obtained by filling one more entry
+  ! than the block writes, rather than by making the arrays larger than the user asked for.
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     h_at_u          ! A mask-weighted thickness interpolated to u-points [H ~> m or kg m-2]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: &
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     h_at_v          ! A mask-weighted thickness interpolated to v-points [H ~> m or kg m-2]
   real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)) :: &
-    h_vrt, &            ! h interpolated to vertices [H ~> m or kg m-2].
+    h_vrt               ! h interpolated to vertices [H ~> m or kg m-2].  Unlike the other
+                        ! interpolated fields this is held over the whole domain, because the
+                        ! vertex-to-tracer averaging reads its I-1 and J-1 neighbours.
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     dz_vrt, &           ! Vertical distance between interface heights [Z ~> m].
     u_vrt, v_vrt, &     ! u_in and v_in interpolated to vertices [L T-1 ~> m s-1].
     T_vrt, S_vrt, rho_vrt ! T [C ~> degC], S [S ~> ppt], and rho [R ~> kg m-3] at vertices.
@@ -702,8 +712,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   ! resolved here rather than in kappa_shear_init so that CS is never modified.  These are the
   ! arrays that are handed to kappa_shear_column, which takes their bounds as arguments rather
   ! than assuming a staggering.
-  real, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
-                  merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     Idz, &      ! The inverse of the thickness of the merged layers [H-1 ~> m2 kg-1].
     h_lay, &    ! The layer thickness [H ~> m or kg m-2]
     dz_lay, &   ! The geometric layer thickness in height units [Z ~> m]
@@ -713,8 +723,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     S0xdz, &    ! The initial salinity times dz [S H ~> ppt m or ppt kg m-2]
     a1          ! a1 is the coupling between adjacent interfaces in the TKE,
                 ! velocity, and density equations [H ~> m or kg m-2]
-  real, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
-                  merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
     kappa, &    ! The shear-driven diapycnal diffusivity at an interface [H Z T-1 ~> m2 s-1 or Pa s]
     tke, &      ! The Turbulent Kinetic Energy per unit mass at an interface [Z2 T-2 ~> m2 s-2].
     kappa_avg, & ! The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
@@ -759,17 +769,17 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   logical :: use_temperature  !  If true, temperature and salinity have been
                         ! allocated and are being used as state variables.
 
-  integer, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
-                     merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
+  integer, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                     merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
     kc                  ! The index map between the original
                         ! interfaces and the interfaces with massless layers
                         ! merged into nearby massive layers.
-  real, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
-                  merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
     kf                  ! The fractional weight of interface kc+1 for
                         ! interpolating back to the original index space [nondim].
-  integer, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
-                     merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0)) :: &
+  integer, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                     merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0)) :: &
     nzc_2d              ! The number of layers in each column after massless layers
                         ! have been merged into nearby massive layers.
   integer, dimension(3,2) :: EOSdom  ! The 1-based domain of indices for the density derivatives
@@ -781,15 +791,24 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
                         ! thickness-weighted averages [H ~> m or kg m-2]
   integer :: IsB, IeB, JsB, JeB, i, j, k, nz, nzc
   integer :: niblock, njblock  ! The block sizes actually used, with 0 resolved to the full domain.
-  integer :: istart, iend      ! First and last I indices of the current block.
-  integer :: jstart, jend      ! First and last J indices of the current block.
+  integer :: delta_i, delta_j  ! The block strides, one less than the block sizes because
+                               ! consecutive blocks overlap by a column and a row.
+  integer :: istart, iend      ! First and last I indices written by the current block.
+  integer :: jstart, jend      ! First and last J indices written by the current block.
+  integer :: iend_read         ! Last I index filled into the block, one beyond iend where there
+                               ! is room, to supply the ii+1 that the corner interpolation reads.
+  integer :: jend_read         ! Last J index filled into the block, as iend_read but in j.
   integer :: ii, jj            ! Block-local 1-based i and j indices.
 
   ! Diagnostics that should be deleted?
   isB = G%isc-1 ; ieB = G%iecB ; jsB = G%jsc-1 ; jeB = G%jecB ; nz = GV%ke
 
-  niblock = merge(IeB-IsB+1, CS%niblock, CS%niblock==0)
-  njblock = merge(JeB-JsB+1, CS%njblock, CS%njblock==0)
+  !   Consecutive blocks overlap by one column and row, so only niblock-1 by njblock-1
+  ! vertices are written per block.  The 0 sentinel therefore resolves to one more than
+  ! the domain extent, so that "the full domain" really is a single block.
+  niblock = merge(IeB-IsB+2, CS%niblock, CS%niblock==0)
+  njblock = merge(JeB-JsB+2, CS%njblock, CS%njblock==0)
+  delta_i = niblock - 1 ; delta_j = njblock - 1
 
   use_temperature = associated(tv%T)
 
@@ -841,81 +860,88 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   ! Convert layer thicknesses into geometric thickness in height units.
   call thickness_to_dz(h, tv, dz_3d, G, GV, US, halo_size=1, do_offload=.true.)
 
-  if (CS%vertex_shear_OBC_bug) then
-    do concurrent( k=1:nz )
-      do concurrent( j=JsB:JeB+1, I=IsB:IeB )
-        h_at_u(I,j,k) = G%mask2dCu(I,j) * (h(i,j,k) + h(i+1,j,k)) * 0.5
+  !   Everything from the thickness interpolation through the write-back is a per-column
+  ! calculation, so it is done a block at a time.  The blocks stride by delta_i and delta_j rather
+  ! than by the block size, because the corner interpolation reads the ii+1 and jj+1 neighbours of
+  ! h_at_v and h_at_u; each block therefore fills one more column and row than it writes, and
+  ! consecutive blocks recompute that shared edge.  iend and jend bound what is written,
+  ! iend_read and jend_read what is filled.
+  do jstart=JsB,JeB,delta_j ; do istart=IsB,IeB,delta_i
+    iend = min(istart + delta_i - 1, IeB)
+    jend = min(jstart + delta_j - 1, JeB)
+    iend_read = min(istart + niblock - 1, IeB+1)
+    jend_read = min(jstart + njblock - 1, JeB+1)
+
+    if (CS%vertex_shear_OBC_bug) then
+      do concurrent( k=1:nz, jj=1:jend_read-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(I, j))
+        I = istart + ii - 1 ; j = jstart + jj - 1
+        h_at_u(ii,jj,k) = G%mask2dCu(I,j) * (h(i,j,k) + h(i+1,j,k)) * 0.5
       enddo
-      do concurrent( J=JsB:JeB, i=IsB:IeB+1 )
-        h_at_v(i,J,k) = G%mask2dCv(i,J) * (h(i,j,k) + h(i,j+1,k)) * 0.5
+      do concurrent( k=1:nz, jj=1:jend-jstart+1, ii=1:iend_read-istart+1 ) DO_LOCALITY(local(i, J))
+        i = istart + ii - 1 ; J = jstart + jj - 1
+        h_at_v(ii,jj,k) = G%mask2dCv(i,J) * (h(i,j,k) + h(i,j+1,k)) * 0.5
       enddo
-    enddo
-  else
-    ! Because G%mask2dCu(I,j) is zero if either G%mask2dT(i,j) or G%mask2dT(i+1,j) except at OBC
-    ! faces, the following form give equivalent answers to those above unless OBCs are in use,
-    ! although the former is clearly less complicated and costly.
-    do concurrent( k=1:nz )
-      do concurrent( j=JsB:JeB+1, I=IsB:IeB )
-        h_at_u(I,j,k) = G%mask2dCu(I,j) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j) * h(i+1,j,k)) / &
+    else
+      ! Because G%mask2dCu(I,j) is zero if either G%mask2dT(i,j) or G%mask2dT(i+1,j) except at OBC
+      ! faces, the following form give equivalent answers to those above unless OBCs are in use,
+      ! although the former is clearly less complicated and costly.
+      do concurrent( k=1:nz, jj=1:jend_read-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(I, j))
+        I = istart + ii - 1 ; j = jstart + jj - 1
+        h_at_u(ii,jj,k) = G%mask2dCu(I,j) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j) * h(i+1,j,k)) / &
                                         (G%mask2dT(i,j) + G%mask2dT(i+1,j) + 1.0e-36)
       enddo
-      do concurrent( J=JsB:JeB, i=IsB:IeB+1 )
-        h_at_v(i,J,k) = G%mask2dCv(i,J) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) / &
+      do concurrent( k=1:nz, jj=1:jend-jstart+1, ii=1:iend_read-istart+1 ) DO_LOCALITY(local(i, J))
+        i = istart + ii - 1 ; J = jstart + jj - 1
+        h_at_v(ii,jj,k) = G%mask2dCv(i,J) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) / &
                                         (G%mask2dT(i,j) + G%mask2dT(i,j+1) + 1.0e-36)
       enddo
+    endif
+
+
+    ! Interpolate the various quantities to the corners, using masks.
+    do concurrent( k=1:nz, jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(I_hwt, I, J))
+        I = istart + ii - 1 ; J = jstart + jj - 1
+        u_vrt(ii,jj,k) = ( (u_in(I,j,k) * h_at_u(ii,jj,k)) + (u_in(I,j+1,k) * h_at_u(ii,jj+1,k)) ) / &
+                    ( (h_at_u(ii,jj,k) + h_at_u(ii,jj+1,k)) + H_tiny )
+        v_vrt(ii,jj,k) = ( (v_in(i,J,k) * h_at_v(ii,jj,k)) + (v_in(i+1,J,k) * h_at_v(ii+1,jj,k)) ) / &
+                    ( (h_at_v(ii,jj,k) + h_at_v(ii+1,jj,k)) + H_tiny )
+
+        I_hwt = 1.0 / (((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
+                        (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k))) + &
+                       GV%H_subroundoff)
+        if (use_temperature) then
+          T_vrt(ii,jj,k) = ( (G%mask2dT(i,j) * (h(i,j,k) * T_in(i,j,k)) + &
+                         G%mask2dT(i+1,j+1) * (h(i+1,j+1,k) * T_in(i+1,j+1,k))) + &
+                        (G%mask2dT(i+1,j) * (h(i+1,j,k) * T_in(i+1,j,k)) + &
+                         G%mask2dT(i,j+1) * (h(i,j+1,k) * T_in(i,j+1,k))) ) * I_hwt
+          S_vrt(ii,jj,k) = ( (G%mask2dT(i,j) * (h(i,j,k) * S_in(i,j,k)) + &
+                         G%mask2dT(i+1,j+1) * (h(i+1,j+1,k) * S_in(i+1,j+1,k))) + &
+                        (G%mask2dT(i+1,j) * (h(i+1,j,k) * S_in(i+1,j,k)) + &
+                         G%mask2dT(i,j+1) * (h(i,j+1,k) * S_in(i,j+1,k))) ) * I_hwt
+        endif
+        h_vrt(I,J,k) = ((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
+                     (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) ) / &
+                    ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
+                     (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
+        dz_vrt(ii,jj,k) = ((G%mask2dT(i,j) * dz_3d(i,j,k) + G%mask2dT(i+1,j+1) * dz_3d(i+1,j+1,k)) + &
+                      (G%mask2dT(i+1,j) * dz_3d(i+1,j,k) + G%mask2dT(i,j+1) * dz_3d(i,j+1,k)) ) / &
+                     ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
+                      (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
+!        h_vrt(I,J,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))
+!        h_vrt(I,J,k) = (((h(i,j,k)**2) + (h(i+1,j+1,k)**2)) + &
+!                     ((h(i+1,j,k)**2) + (h(i,j+1,k)**2))) * I_hwt
     enddo
-  endif
 
-
-  ! Interpolate the various quantities to the corners, using masks.
-  do concurrent( k=1:nz, J=JsB:JeB, I=IsB:IeB ) DO_LOCALITY(local(I_hwt))
-      u_vrt(I,J,k) = ( (u_in(I,j,k) * h_at_u(I,j,k)) + (u_in(I,j+1,k) * h_at_u(I,j+1,k)) ) / &
-                  ( (h_at_u(I,j,k) + h_at_u(I,j+1,k)) + H_tiny )
-      v_vrt(I,J,k) = ( (v_in(i,J,k) * h_at_v(i,J,k)) + (v_in(i+1,J,k) * h_at_v(i+1,J,k)) ) / &
-                  ( (h_at_v(i,J,k) + h_at_v(i+1,J,k)) + H_tiny )
-
-      I_hwt = 1.0 / (((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
-                      (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k))) + &
-                     GV%H_subroundoff)
-      if (use_temperature) then
-        T_vrt(I,J,k) = ( (G%mask2dT(i,j) * (h(i,j,k) * T_in(i,j,k)) + &
-                       G%mask2dT(i+1,j+1) * (h(i+1,j+1,k) * T_in(i+1,j+1,k))) + &
-                      (G%mask2dT(i+1,j) * (h(i+1,j,k) * T_in(i+1,j,k)) + &
-                       G%mask2dT(i,j+1) * (h(i,j+1,k) * T_in(i,j+1,k))) ) * I_hwt
-        S_vrt(I,J,k) = ( (G%mask2dT(i,j) * (h(i,j,k) * S_in(i,j,k)) + &
-                       G%mask2dT(i+1,j+1) * (h(i+1,j+1,k) * S_in(i+1,j+1,k))) + &
-                      (G%mask2dT(i+1,j) * (h(i+1,j,k) * S_in(i+1,j,k)) + &
-                       G%mask2dT(i,j+1) * (h(i,j+1,k) * S_in(i,j+1,k))) ) * I_hwt
-      endif
-      h_vrt(I,J,k) = ((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
-                   (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) ) / &
-                  ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
-                   (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
-      dz_vrt(I,J,k) = ((G%mask2dT(i,j) * dz_3d(i,j,k) + G%mask2dT(i+1,j+1) * dz_3d(i+1,j+1,k)) + &
-                    (G%mask2dT(i+1,j) * dz_3d(i+1,j,k) + G%mask2dT(i,j+1) * dz_3d(i,j+1,k)) ) / &
-                   ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
-                    (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
-!      h_vrt(I,J,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))
-!      h_vrt(I,J,k) = (((h(i,j,k)**2) + (h(i+1,j+1,k)**2)) + &
-!                   ((h(i+1,j,k)**2) + (h(i,j+1,k)**2))) * I_hwt
-  enddo
-
-  if (.not.use_temperature) then
-    do concurrent( k=1:nz, J=JsB:JeB, I=IsB:IeB )
-      rho_vrt(I,J,k) = GV%Rlay(k)
-    enddo
-  endif
+    if (.not.use_temperature) then
+      do concurrent( k=1:nz, jj=1:jend-jstart+1, ii=1:iend-istart+1 )
+        rho_vrt(ii,jj,k) = GV%Rlay(k)
+      enddo
+    endif
 
 !---------------------------------------
 ! Set up each column: merge massless layers, apply a timestep of background diffusion, and
 ! assemble the interface temperatures, salinities and pressures that the equation of state needs.
 !---------------------------------------
-  !   Everything from the massless-layer merge through the write-back is a per-column
-  ! calculation, so it is done a block at a time.  On the GPU the block is the whole domain and
-  ! this nest runs once; on the CPU it is a single column.
-  do jstart=JsB,JeB,njblock ; do istart=IsB,IeB,niblock
-    iend = min(istart + niblock - 1, IeB)
-    jend = min(jstart + njblock - 1, JeB)
 
     do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) &
         DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1, k, I, J))
@@ -952,15 +978,15 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
             kc(ii,jj,k) = nzc
             h_lay(ii,jj,nzc) = h_lay(ii,jj,nzc) + h_vrt(I,J,k)
-            dz_lay(ii,jj,nzc) = dz_lay(ii,jj,nzc) + dz_vrt(I,J,k)
-            u0xdz(ii,jj,nzc) = u0xdz(ii,jj,nzc) + u_vrt(I,J,k)*h_vrt(I,J,k)
-            v0xdz(ii,jj,nzc) = v0xdz(ii,jj,nzc) + v_vrt(I,J,k)*h_vrt(I,J,k)
+            dz_lay(ii,jj,nzc) = dz_lay(ii,jj,nzc) + dz_vrt(ii,jj,k)
+            u0xdz(ii,jj,nzc) = u0xdz(ii,jj,nzc) + u_vrt(ii,jj,k)*h_vrt(I,J,k)
+            v0xdz(ii,jj,nzc) = v0xdz(ii,jj,nzc) + v_vrt(ii,jj,k)*h_vrt(I,J,k)
             if (use_temperature) then
-              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + T_vrt(I,J,k)*h_vrt(I,J,k)
-              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + S_vrt(I,J,k)*h_vrt(I,J,k)
+              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + T_vrt(ii,jj,k)*h_vrt(I,J,k)
+              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + S_vrt(ii,jj,k)*h_vrt(I,J,k)
             else
-              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + rho_vrt(I,J,k)*h_vrt(I,J,k)
-              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + rho_vrt(I,J,k)*h_vrt(I,J,k)
+              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + rho_vrt(ii,jj,k)*h_vrt(I,J,k)
+              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + rho_vrt(ii,jj,k)*h_vrt(I,J,k)
             endif
           enddo
           kc(ii,jj,nz+1) = nzc+1
@@ -984,16 +1010,16 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         else
           do concurrent( k=1:nz )
             h_lay(ii,jj,k) = h_vrt(I,J,k)
-            dz_lay(ii,jj,k) = dz_vrt(I,J,k)
-            u0xdz(ii,jj,k) = u_vrt(I,J,k)*h_lay(ii,jj,k) ; v0xdz(ii,jj,k) = v_vrt(I,J,k)*h_lay(ii,jj,k)
+            dz_lay(ii,jj,k) = dz_vrt(ii,jj,k)
+            u0xdz(ii,jj,k) = u_vrt(ii,jj,k)*h_lay(ii,jj,k) ; v0xdz(ii,jj,k) = v_vrt(ii,jj,k)*h_lay(ii,jj,k)
           enddo
           if (use_temperature) then
             do concurrent( k=1:nz )
-              T0xdz(ii,jj,k) = T_vrt(I,J,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = S_vrt(I,J,k)*h_lay(ii,jj,k)
+              T0xdz(ii,jj,k) = T_vrt(ii,jj,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = S_vrt(ii,jj,k)*h_lay(ii,jj,k)
             enddo
           else
             do concurrent( k=1:nz )
-              T0xdz(ii,jj,k) = rho_vrt(I,J,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = rho_vrt(I,J,k)*h_lay(ii,jj,k)
+              T0xdz(ii,jj,k) = rho_vrt(ii,jj,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = rho_vrt(ii,jj,k)*h_lay(ii,jj,k)
             enddo
           endif
           nzc = nz
@@ -2626,6 +2652,26 @@ function kappa_shear_init(Time, G, GV, US, param_file, diag, CS)
                                             "use 0 to select the full computational domain.")
   if (CS%njblock < 0) call MOM_error(FATAL, "KAPPA_SHEAR_NJBLOCK must be nonnegative; "//&
                                             "use 0 to select the full computational domain.")
+  !   The vertex scheme interpolates thicknesses to the u- and v-points and then reads the j+1 and
+  ! i+1 neighbours of those arrays, so consecutive blocks have to overlap by one row and one
+  ! column.  That leaves niblock-1 columns and njblock-1 rows actually written per block, which is
+  ! impossible with a block size of 1.  This is the one case where the requested block size cannot
+  ! be honoured, so say so rather than failing or silently reading past the end of a block.  The
+  ! tracer-point scheme has no such stencil and is left alone.
+  if (CS%KS_at_vertex .and. .not.just_read) then
+    if (CS%niblock == 1) then
+      call MOM_error(WARNING, "KAPPA_SHEAR_NIBLOCK must be >= 2, or 0, when VERTEX_SHEAR is "//&
+                     "true, because consecutive blocks overlap by one column.  Changing the i "//&
+                     "block size from 1 to 2 for this run.")
+      CS%niblock = 2
+    endif
+    if (CS%njblock == 1) then
+      call MOM_error(WARNING, "KAPPA_SHEAR_NJBLOCK must be >= 2, or 0, when VERTEX_SHEAR is "//&
+                     "true, because consecutive blocks overlap by one row.  Changing the j "//&
+                     "block size from 1 to 2 for this run.")
+      CS%njblock = 2
+    endif
+  endif
   call get_param(param_file, mdl, "ENABLE_BUGS_BY_DEFAULT", enable_bugs, &
                  default=.true., do_not_log=.true.)  ! This is logged from MOM.F90.
   call get_param(param_file, mdl, "VERTEX_SHEAR_VISCOSITY_BUG", CS%VS_viscosity_bug, &
