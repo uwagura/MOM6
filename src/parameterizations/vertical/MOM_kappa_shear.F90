@@ -23,6 +23,7 @@ use MOM_EOS,               only : calculate_density, calculate_specific_vol_deri
 implicit none ; private
 
 #include <MOM_memory.h>
+#include "do_concurrent_compat.h"
 
 public Calculate_kappa_shear, Calc_kappa_shear_vertex, kappa_shear_init
 public kappa_shear_is_used, kappa_shear_at_vertex
@@ -276,20 +277,15 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp &                 kf, kc, kappa, Idz, dz_3d)
 
   ! Locals that are used by kappa_shear column - also allocating, since they are not initialized here
-  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
-  
-  ! TEST: new locals that need to be allocated to split density deriv calc from 
-  ! column calculation
-  !$omp target enter data map(alloc: dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, &
-  !$omp &                  pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
+  !$omp target enter data map(alloc: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+  !$omp &                            dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, &
+  !$omp &                            pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
 
   ! Calculate thicknesses outside of main kernel
   ! Convert layer thicknesses into geometric thickness in height units.
   call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload = .true. ) 
 
-  !$omp target teams distribute parallel do collapse(2) &
-  !$omp &   private(nzc, surface_pres, dz_in_lay, b1, d1, bd1)
-  do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
+  do concurrent( j=js:je, i=is:ie, G%mask2dT(i,j) > 0.0 ) DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1))
 
     ! Store a transposed version of the initial arrays.
     ! Any elimination of massless layers would occur here.
@@ -426,7 +422,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     ! Save the number of collapsed layers for each column
     nzc_2d(i,j) = nzc
 
-  endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
+  enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
 
 
   ! Get dbouy_Dt and dbouy_DS
@@ -461,8 +457,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !   dbuoy_dT(i,j,nzc+1) = -GV%g_Earth_Z_T2 / GV%Rlay(nzc)
   endif
 
-  !$omp target teams distribute parallel do collapse(2) private( f2, i ,j )  
-  do j=js,je ; do i=is,ie ; if (G%mask2dT(i,j) > 0.0) then
+  do concurrent( j=js:je, i=is:ie ) DO_LOCALITY(local( f2, k )); if (G%mask2dT(i,j) > 0.0) then
 
     f2 = 0.25 * ((G%Coriolis2Bu(I,J) + G%Coriolis2Bu(I-1,J-1)) + &
                   (G%Coriolis2Bu(I,J-1) + G%Coriolis2Bu(I-1,J)))
@@ -471,7 +466,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
     ! Set the initial guess for kappa, here defined at interfaces.
     ! ----------------------------------------------------
-    do K=1,nzc_2d(i,j)+1
+    do concurrent( K=1:nzc_2d(i,j)+1 )
       kappa(i,j,K) = CS%kappa_seed
     enddo
 
@@ -483,7 +478,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     ! call cpu_clock_begin(id_clock_setup)
     ! Extrapolate from the vertically reduced grid back to the original layers.
     if (nz == nzc_2d(i,j)) then
-      do K=1,nz+1
+      do concurrent( K=1:nz+1 )
         kappa_io(i,j,K) = kappa_avg(i,j,K)
         if (CS%all_layer_TKE_bug) then
           tke_io(i,j,K) = tke(i,j,K)
@@ -491,21 +486,21 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
           tke_io(i,j,K) = tke_avg(i,j,K)
         endif
       enddo
-      if (CS%id_N2_mean>0) then ; do K=1,nz+1
+      if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
         diag_N2_mean(i,j,K) = N2_mean(i,j,K)
       enddo ; endif
-      if (CS%id_S2_mean>0) then ; do K=1,nz+1
+      if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
         diag_S2_mean(i,j,K) = S2_mean(i,j,K)
       enddo ; endif
-      if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
+      if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
         diag_N2_init(i,j,K) = N2_init(i,j,K)
       enddo ; endif
-      if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
+      if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
         diag_S2_init(i,j,K) = S2_init(i,j,K)
       enddo ; endif
     else
       ! Could these do loops be combined?
-      do K=1,nz+1
+      do concurrent( K=1:nz+1 )
         if (kf(i,j,K) == 0.0) then
           kappa_io(i,j,K) = kappa_avg(i,j,kc(i,j,K))
           tke_io(i,j,K) = tke_avg(i,j,kc(i,j,K))
@@ -514,7 +509,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
           tke_io(i,j,K) = (1.0-kf(i,j,K)) * tke_avg(i,j,kc(i,j,K)) + kf(i,j,K) * tke_avg(i,j,kc(i,j,K)+1)
         endif
       enddo
-      do K=1,nz+1
+      do concurrent( K=1:nz+1 )
         if (kf(i,j,K) == 0.0) then
           if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(i,j,kc(i,j,K))
           if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(i,j,kc(i,j,K))
@@ -533,7 +528,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       enddo
     endif ! end of if (nz == nzc)
 
-    do K=1,nz+1
+    do concurrent( K=1:nz+1 )
       kv_io(i,j,K) = kappa_io(i,j,K) * CS%Prandtl_turb
     enddo
     ! call cpu_clock_end(id_clock_setup)
@@ -541,19 +536,19 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     do K=1,nz+1
       kappa_io(i,j,K) = 0.0 ; tke_io(i,j,K) = 0.0 ; kv_io(i,j,K) = 0.0
     enddo
-    if (CS%id_N2_mean>0) then ; do K=1,nz+1
+    if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
       diag_N2_mean(i,j,K) = 0.0
     enddo ; endif
-    if (CS%id_S2_mean>0) then ; do K=1,nz+1
+    if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
       diag_S2_mean(i,j,K) = 0.0
     enddo ; endif
-    if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
+    if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
       diag_N2_init(i,j,K) = 0.0
     enddo ; endif
-    if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
+    if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
       diag_S2_init(i,j,K) = 0.0
     enddo ; endif
-  endif ; enddo ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
+  endif ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
   
 
   if (CS%debug) then
@@ -567,11 +562,9 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                 kf, kc, kappa, Idz)
   !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
-  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
-
-   !TEST: DELETE NEW LOCALS
-  !$omp target exit data map(delete: dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, & 
-  !$omp &                    pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
+  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
+  !$omp &                            dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, & 
+  !$omp &                            pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
 
   if (CS%id_Kd_shear > 0) call post_data(CS%id_Kd_shear, kappa_io, CS%diag)
   if (CS%id_TKE > 0) call post_data(CS%id_TKE, tke_io, CS%diag)
@@ -740,48 +733,61 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
   !$omp &                 c1, kc, kf, nzc_2d)
 
-  !   The diagnostics are zeroed over their whole extent because the loops below only cover
-  ! IsB:IeB by JsB:JeB, and kappa_vertex likewise because the vertex-to-tracer averaging reads a
-  ! halo point at I-1/J-1.
-  !$omp target teams distribute parallel do collapse(3)
-  do K=1,nz+1 ; do J=G%JsdB,G%JedB ; do I=G%IsdB,G%IedB
-    diag_N2_init(I,J,K) = 0.0 ; diag_S2_init(I,J,K) = 0.0
-    diag_N2_mean(I,J,K) = 0.0 ; diag_S2_mean(I,J,K) = 0.0
+  if (CS%debug .or. CS%id_N2_init>0) then
+    do concurrent( K=1:nz+1, J=G%JsdB:G%JedB, I=G%IsdB:G%IedB )
+      diag_N2_init(I,J,K) = 0.0
+    enddo
+  endif
+  if (CS%debug .or. CS%id_S2_init>0) then
+    do concurrent( K=1:nz+1, J=G%JsdB:G%JedB, I=G%IsdB:G%IedB )
+      diag_S2_init(I,J,K) = 0.0
+    enddo
+  endif
+  if (CS%id_N2_mean>0) then
+    do concurrent( K=1:nz+1, J=G%JsdB:G%JedB, I=G%IsdB:G%IedB )
+      diag_N2_mean(I,J,K) = 0.0
+    enddo
+  endif
+  if (CS%id_S2_mean>0) then
+    do concurrent( K=1:nz+1, J=G%JsdB:G%JedB, I=G%IsdB:G%IedB )
+      diag_S2_mean(I,J,K) = 0.0
+    enddo
+  endif
+  do concurrent( K=1:nz+1, J=G%JsdB:G%JedB, I=G%IsdB:G%IedB )
     kappa_vertex(I,J,K) = 0.0
-  enddo ; enddo ; enddo
+  enddo
 
   ! Convert layer thicknesses into geometric thickness in height units.
   call thickness_to_dz(h, tv, dz_3d, G, GV, US, halo_size=1, do_offload=.true.)
 
   if (CS%vertex_shear_OBC_bug) then
-    !$omp target teams distribute parallel do collapse(3)
-    do k=1,nz ; do j=JsB,JeB+1 ; do I=IsB,IeB
-      h_at_u(I,j,k) = G%mask2dCu(I,j) * (h(i,j,k) + h(i+1,j,k)) * 0.5
-    enddo ; enddo ; enddo
-    !$omp target teams distribute parallel do collapse(3)
-    do k=1,nz ; do J=JsB,JeB ; do i=IsB,IeB+1
-      h_at_v(i,J,k) = G%mask2dCv(i,J) * (h(i,j,k) + h(i,j+1,k)) * 0.5
-    enddo ; enddo ; enddo
+    do concurrent( k=1:nz )
+      do concurrent( j=JsB:JeB+1, I=IsB:IeB )
+        h_at_u(I,j,k) = G%mask2dCu(I,j) * (h(i,j,k) + h(i+1,j,k)) * 0.5
+      enddo
+      do concurrent( J=JsB:JeB, i=IsB:IeB+1 )
+        h_at_v(i,J,k) = G%mask2dCv(i,J) * (h(i,j,k) + h(i,j+1,k)) * 0.5
+      enddo
+    enddo
   else
     ! Because G%mask2dCu(I,j) is zero if either G%mask2dT(i,j) or G%mask2dT(i+1,j) except at OBC
     ! faces, the following form give equivalent answers to those above unless OBCs are in use,
     ! although the former is clearly less complicated and costly.
-    !$omp target teams distribute parallel do collapse(3)
-    do k=1,nz ; do j=JsB,JeB+1 ; do I=IsB,IeB
-      h_at_u(I,j,k) = G%mask2dCu(I,j) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j) * h(i+1,j,k)) / &
+    do concurrent( k=1:nz )
+      do concurrent( j=JsB:JeB+1, I=IsB:IeB )
+        h_at_u(I,j,k) = G%mask2dCu(I,j) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j) * h(i+1,j,k)) / &
                                         (G%mask2dT(i,j) + G%mask2dT(i+1,j) + 1.0e-36)
-    enddo ; enddo ; enddo
-    !$omp target teams distribute parallel do collapse(3)
-    do k=1,nz ; do J=JsB,JeB ; do i=IsB,IeB+1
-      h_at_v(i,J,k) = G%mask2dCv(i,J) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) / &
+      enddo
+      do concurrent( J=JsB:JeB, i=IsB:IeB+1 )
+        h_at_v(i,J,k) = G%mask2dCv(i,J) * (G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) / &
                                         (G%mask2dT(i,j) + G%mask2dT(i,j+1) + 1.0e-36)
-    enddo ; enddo ; enddo
+      enddo
+    enddo
   endif
 
 
   ! Interpolate the various quantities to the corners, using masks.
-  !$omp target teams distribute parallel do collapse(3) private(I_hwt)
-  do k=1,nz ; do J=JsB,JeB ; do I=IsB,IeB
+  do concurrent( k=1:nz, J=JsB:JeB, I=IsB:IeB ) DO_LOCALITY(local(I_hwt))
       u_vrt(I,J,k) = ( (u_in(I,j,k) * h_at_u(I,j,k)) + (u_in(I,j+1,k) * h_at_u(I,j+1,k)) ) / &
                   ( (h_at_u(I,j,k) + h_at_u(I,j+1,k)) + H_tiny )
       v_vrt(I,J,k) = ( (v_in(i,J,k) * h_at_v(i,J,k)) + (v_in(i+1,J,k) * h_at_v(i+1,J,k)) ) / &
@@ -811,28 +817,25 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 !      h_vrt(I,J,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))
 !      h_vrt(I,J,k) = (((h(i,j,k)**2) + (h(i+1,j+1,k)**2)) + &
 !                   ((h(i+1,j,k)**2) + (h(i,j+1,k)**2))) * I_hwt
-  enddo ; enddo ; enddo ! end of the corner-interpolation loops
+  enddo
 
   if (.not.use_temperature) then
-    !$omp target teams distribute parallel do collapse(3)
-    do k=1,nz ; do J=JsB,JeB ; do I=IsB,IeB
+    do concurrent( k=1:nz, J=JsB:JeB, I=IsB:IeB )
       rho_vrt(I,J,k) = GV%Rlay(k)
-    enddo ; enddo ; enddo
+    enddo
   endif
 
 !---------------------------------------
 ! Set up each column: merge massless layers, apply a timestep of background diffusion, and
 ! assemble the interface temperatures, salinities and pressures that the equation of state needs.
 !---------------------------------------
-  !$omp target teams distribute parallel do collapse(2) &
-  !$omp &   private(nzc, surface_pres, dz_in_lay, b1, d1, bd1)
-  do J=JsB,JeB ; do I=IsB,IeB
+  do concurrent( J=JsB:JeB, I=IsB:IeB ) DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1, k))
 
     !   The equation of state is evaluated over the whole (I,J,K) rectangle below, including land
     ! points and interfaces deeper than nzc, so zero its inputs everywhere first rather than
     ! letting it read whatever the uninitialized memory holds.  Only K=1:nzc are set below, and
     ! only the results at K=2:nzc of wet columns are ever read.
-    do K=1,nz+1
+    do concurrent( K=1:nz+1 )
       pressure(I,J,K) = 0.0 ; T_int(I,J,K) = 0.0 ; Sal_int(I,J,K) = 0.0
     enddo
     nzc_2d(I,J) = 0
@@ -873,7 +876,9 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         kc(I,J,nz+1) = nzc+1
 
         ! Set up Idz as the inverse of layer thicknesses.
-        do k=1,nzc ; Idz(I,J,k) = 1.0 / h_lay(I,J,k) ; enddo
+        do concurrent( k=1:nzc )
+          Idz(I,J,k) = 1.0 / h_lay(I,J,k)
+        enddo
 
         !   Now determine kf, the fractional weight of interface kc when
         ! interpolating between interfaces kc and kc+1.
@@ -887,28 +892,31 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         enddo
         kf(I,J,nz+1) = 0.0
       else
-        do k=1,nz
+        do concurrent( k=1:nz )
           h_lay(I,J,k) = h_vrt(I,J,k)
           dz_lay(I,J,k) = dz_vrt(I,J,k)
           u0xdz(I,J,k) = u_vrt(I,J,k)*h_lay(I,J,k) ; v0xdz(I,J,k) = v_vrt(I,J,k)*h_lay(I,J,k)
         enddo
         if (use_temperature) then
-          do k=1,nz
+          do concurrent( k=1:nz )
             T0xdz(I,J,k) = T_vrt(I,J,k)*h_lay(I,J,k) ; S0xdz(I,J,k) = S_vrt(I,J,k)*h_lay(I,J,k)
           enddo
         else
-          do k=1,nz
+          do concurrent( k=1:nz )
             T0xdz(I,J,k) = rho_vrt(I,J,k)*h_lay(I,J,k) ; S0xdz(I,J,k) = rho_vrt(I,J,k)*h_lay(I,J,k)
           enddo
         endif
         nzc = nz
-        do k=1,nzc+1 ; kc(I,J,k) = k ; kf(I,J,k) = 0.0 ; enddo
+        do concurrent( k=1:nzc+1 )
+          kc(I,J,k) = k
+          kf(I,J,k) = 0.0
+        enddo
       endif
 
       !   Set up I_dz_int as the inverse of the distance between adjacent layer centers, for
       ! applying the background diffusivity.
       I_dz_int(I,J,1) = 2.0 / dz_lay(I,J,1)
-      do K=2,nzc
+      do concurrent( K=2:nzc )
         I_dz_int(I,J,K) = 2.0 / (dz_lay(I,J,K-1) + dz_lay(I,J,K))
       enddo
       I_dz_int(I,J,nzc+1) = 2.0 / dz_lay(I,J,nzc)
@@ -971,7 +979,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       endif
       if (use_temperature) then
         pressure(I,J,1) = surface_pres
-        do k=2,nzc
+        do concurrent( k=2:nzc )
           pressure(I,J,k) = pressure(I,J,k-1) + gR0*h_lay(I,J,k-1)
           T_int(I,J,k) = 0.5*(T(I,J,k-1) + T(I,J,k))
           Sal_int(I,J,k) = 0.5*(Sal(I,J,k-1) + Sal(I,J,k))
@@ -981,7 +989,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       ! Save the number of merged layers for the stages below.
       nzc_2d(I,J) = nzc
     endif
-  enddo ; enddo ! end of the setup I- and J-loops
+  enddo ! end of the setup I- and J-loops
 
   ! Calculate the thermodynamic coefficients for all of the vertex columns at once.
   if (use_temperature) then
@@ -999,8 +1007,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 !---------------------------------------
 ! Work on each column.
 !---------------------------------------
-  !$omp target teams distribute parallel do collapse(2) private(nzc, f2)
-  do J=JsB,JeB ; do I=IsB,IeB
+  do concurrent( J=JsB:JeB, I=IsB:IeB ) DO_LOCALITY(local(nzc, f2, k ))
     if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
         (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
       nzc = nzc_2d(I,J)
@@ -1018,7 +1025,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
     ! Extrapolate from the vertically reduced grid back to the original layers.
       if (nz == nzc) then
-        do K=1,nz+1
+        do concurrent( K=1:nz+1 )
           kappa_full(I,J,K) = kappa_avg(I,J,K)
           if (CS%all_layer_TKE_bug) then
             tke_full(I,J,K) = tke(I,J,K)
@@ -1026,20 +1033,20 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
             tke_full(I,J,K) = tke_avg(I,J,K)
           endif
         enddo
-        if (CS%id_N2_mean>0) then ; do K=1,nz+1
+        if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
           diag_N2_mean(I,J,K) = N2_mean(I,J,K)
         enddo ; endif
-        if (CS%id_S2_mean>0) then ; do K=1,nz+1
+        if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
           diag_S2_mean(I,J,K) = S2_mean(I,J,K)
         enddo ; endif
-        if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
+        if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
           diag_N2_init(I,J,K) = N2_init(I,J,K)
         enddo ; endif
-        if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
+        if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
           diag_S2_init(I,J,K) = S2_init(I,J,K)
         enddo ; endif
       else
-        do K=1,nz+1
+        do concurrent( K=1:nz+1 )
           if (kf(I,J,K) == 0.0) then
             kappa_full(I,J,K) = kappa_avg(I,J,kc(I,J,K))
             tke_full(I,J,K) = tke_avg(I,J,kc(I,J,K))
@@ -1050,7 +1057,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
                               kf(I,J,K) * tke_avg(I,J,kc(I,J,K)+1)
           endif
         enddo
-        do K=1,nz+1
+        do concurrent( K=1:nz+1 )
           if (kf(I,J,K) == 0.0) then
             if (CS%id_N2_mean>0) diag_N2_mean(I,J,K) = N2_mean(I,J,kc(I,J,K))
             if (CS%id_S2_mean>0) diag_S2_mean(I,J,K) = S2_mean(I,J,kc(I,J,K))
@@ -1073,43 +1080,38 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         enddo
       endif
     else  ! Land points.
-      do K=1,nz+1
+      do concurrent( K=1:nz+1 )
         kappa_full(I,J,K) = 0.0 ; tke_full(I,J,K) = 0.0
       enddo
     endif
-  enddo ; enddo ! end of the column I- and J-loops
+  enddo ! end of the column I- and J-loops
 
   ! Store the results for restarts or interpolation back to tracer points.
   if (CS%VS_viscosity_bug) then
-    !$omp target teams distribute parallel do collapse(3)
-    do K=1,nz+1 ; do J=JsB,JeB ; do I=IsB,IeB
+    do concurrent( K=1:nz+1, J=JsB:JeB, I=IsB:IeB )
       kappa_vertex(I,J,K) = kappa_full(I,J,K)
       tke_io(I,J,K) = G%mask2dBu(I,J) * tke_full(I,J,K)
       kv_io(I,J,K) = ( G%mask2dBu(I,J) * kappa_vertex(I,J,K) ) * Prandtl_turb
-    enddo ; enddo ; enddo
+    enddo
   else
-    !$omp target teams distribute parallel do collapse(3)
-    do K=1,nz+1 ; do J=JsB,JeB ; do I=IsB,IeB
+    do concurrent( K=1:nz+1, J=JsB:JeB, I=IsB:IeB )
       kappa_vertex(I,J,K) = kappa_full(I,J,K)
       tke_io(I,J,K) = tke_full(I,J,K)
       kv_io(I,J,K) = kappa_vertex(I,J,K) * Prandtl_turb
-    enddo ; enddo ; enddo
+    enddo
   endif
 
   ! Set the diffusivities in tracer columns from the values at vertices.
 
-  !$omp target teams distribute parallel do collapse(2)
-  do j=G%jsc,G%jec ; do i=G%isc,G%iec
+  do concurrent( j=G%jsc:G%jec, i=G%isc:G%iec )
     ! The turbulent length scales (and hence turbulent diffusivity) should always go to 0 at the top and bottom.
     kappa_io(i,j,1) = 0.0
     kappa_io(i,j,nz+1) = 0.0
-  enddo ; enddo
+  enddo
   if (CS%VS_ThicknessMean .and. CS%VS_GeometricMean) then
     ! This conversion factor is required to allow for arbitrary fractional powers of the diffusivities.
     mks_to_HZ_T = 1.0 /  GV%HZ_T_to_MKS
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp &   private(h_SW, h_NE, h_NW, h_SE, I_htot)
-    do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+    do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec ) DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot))
       h_SW = 0.5 * (h_vrt(I-1,J-1,k) + h_vrt(I-1,J-1,k-1))
       h_NE = 0.5 * (h_vrt(I,J,k) + h_vrt(I,J,k-1))
       h_NW = 0.5 * (h_vrt(I-1,J,k) + h_vrt(I-1,J,k-1))
@@ -1130,11 +1132,9 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
               (max(kappa_vertex(I-1,J-1,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J,K),CS%VS_GeoMean_Kdmin)) * &
               (max(kappa_vertex(I-1,J,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J-1,K),CS%VS_GeoMean_Kdmin)) ))
       endif
-    enddo ; enddo ; enddo
+    enddo
   elseif (CS%VS_ThicknessMean) then   ! Use thickness-weighted arithmetic mean diffusivities.
-    !$omp target teams distribute parallel do collapse(3) &
-    !$omp &   private(h_SW, h_NE, h_NW, h_SE, I_htot)
-    do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+    do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec ) DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot))
       h_SW = 0.5 * (h_vrt(I-1,J-1,k) + h_vrt(I-1,J-1,k-1))
       h_NE = 0.5 * (h_vrt(I,J,k) + h_vrt(I,J,k-1))
       h_NW = 0.5 * (h_vrt(I-1,J,k) + h_vrt(I-1,J,k-1))
@@ -1144,21 +1144,19 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       kappa_io(i,j,K) = G%mask2dT(i,j) * &
             (((kappa_vertex(I-1,J-1,K)*h_SW) + (kappa_vertex(I,J,K)*h_NE)) + &
              ((kappa_vertex(I-1,J,K)*h_NW) + (kappa_vertex(I,J-1,K)*h_SE))) * I_htot
-    enddo ; enddo ; enddo
+    enddo
   elseif (CS%VS_GeometricMean) then   ! The geometic mean diffusivities are not thickness weighted.
-    !$omp target teams distribute parallel do collapse(3)
-    do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+    do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec )
       kappa_io(i,j,K) = G%mask2dT(i,j) * sqrt(sqrt( &
             (max(kappa_vertex(I-1,J-1,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J,K),CS%VS_GeoMean_Kdmin)) * &
             (max(kappa_vertex(I-1,J,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J-1,K),CS%VS_GeoMean_Kdmin)) ))
-    enddo ; enddo ; enddo
+    enddo
   else   ! Use a non-thickness weighted arithmetic mean.
-    !$omp target teams distribute parallel do collapse(3)
-    do K=2,nz ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+    do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec )
       kappa_io(i,j,K) = G%mask2dT(i,j) * 0.25 * &
                        ((kappa_vertex(I-1,J-1,K) + kappa_vertex(I,J,K)) +&
                         (kappa_vertex(I-1,J,K) + kappa_vertex(I,J-1,K)))
-    enddo ; enddo ; enddo
+    enddo
   endif
 
   !   The checksums and the diagnostics below all read host memory, so anything they touch has to
@@ -1214,7 +1212,7 @@ end subroutine Calc_kappa_shear_vertex
 
 
 !> This subroutine calculates shear-driven diffusivity and TKE in a single column
-subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay, dz_lay, I_dz_int, &
+pure subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay, dz_lay, I_dz_int, &
                               kappa_avg, u, v, T, Sal,   tke_avg, N2_init, S2_init, &
                               N2_mean, S2_mean, CS, GV, US, id_lo, id_hi, jd_lo, jd_hi, i, j )
   !$omp declare target
@@ -1276,7 +1274,7 @@ subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, hlay,
   real, dimension(id_lo:id_hi,jd_lo:jd_hi,SZK_(GV)+1), &
                      intent(out)   :: S2_init  !< The initial value of S2 [Z2 T-2 ~> m2 s-2].
   real,                    intent(in)    :: dt !< Time increment [T ~> s].
-  type(Kappa_shear_CS),    pointer       :: CS !< The control structure returned by a previous
+  type(Kappa_shear_CS),    intent(in)    :: CS !< The control structure returned by a previous
                                                !! call to kappa_shear_init.
   type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
   integer,           intent(in)    :: i, j !< The horizontal indices of the column being processed.
@@ -1694,7 +1692,7 @@ end subroutine kappa_shear_column
 !>   This subroutine calculates the velocities, temperature and salinity that
 !! the water column will have after mixing for dt with diffusivities kappa.  It
 !! may also calculate the projected buoyancy frequency and shear.
-subroutine calculate_projected_state(kappa, u0, v0, T0, S0, dt, nz, dz, I_dz_int, dbuoy_dT, dbuoy_dS, &
+pure subroutine calculate_projected_state(kappa, u0, v0, T0, S0, dt, nz, dz, I_dz_int, dbuoy_dT, dbuoy_dS, &
                                      vel_under, u, v, T, Sal, N2, S2, GV, US, ks_int, ke_int)
   !$omp declare target
   integer,               intent(in)    :: nz  !< The number of layers (after eliminating massless
@@ -1830,7 +1828,7 @@ subroutine calculate_projected_state(kappa, u0, v0, T0, S0, dt, nz, dz, I_dz_int
 end subroutine calculate_projected_state
 
 !> This subroutine calculates new, consistent estimates of TKE and kappa.
-subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
+pure subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I_L2_bdry, f2, &
                           nz, CS, GV, US, K_Q, tke, kappa, kappa_src, local_src)
   !$omp declare target
   integer,               intent(in)    :: nz  !< The number of layers to work on.
