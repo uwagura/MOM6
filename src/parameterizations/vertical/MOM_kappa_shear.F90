@@ -630,20 +630,20 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     h_at_u          ! A mask-weighted thickness interpolated to u-points [H ~> m or kg m-2]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)) :: &
     h_at_v          ! A mask-weighted thickness interpolated to v-points [H ~> m or kg m-2]
-  !   All of the per-column scratch below is held in full 3-d arrays at vertex points, so that
-  ! each column is an independent (I,J) task with no per-thread private arrays.  These are the
-  ! arrays that are handed to kappa_shear_column, which takes their IsdB/IedB/JsdB/JedB bounds
-  ! as arguments rather than assuming a staggering.
   real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)) :: &
     h_vrt, &            ! h interpolated to vertices [H ~> m or kg m-2].
     dz_vrt, &           ! Vertical distance between interface heights [Z ~> m].
     u_vrt, v_vrt, &     ! u_in and v_in interpolated to vertices [L T-1 ~> m s-1].
     T_vrt, S_vrt, rho_vrt ! T [C ~> degC], S [S ~> ppt], and rho [R ~> kg m-3] at vertices.
-  real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: &
-    kappa_full  ! kappa mapped back to the original interfaces [H Z T-1 ~> m2 s-1 or Pa s]
-  real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: &
-    tke_full    ! tke mapped back to the original interfaces [Z2 T-2 ~> m2 s-2].
-  real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)) :: &
+  !   All of the per-column scratch below is held in blocked 3-d arrays, so that each column in a
+  ! block is an independent (ii,jj) task with no per-thread private arrays.  A 0 setting of
+  ! CS%niblock or CS%njblock means the full computational domain, which is the GPU default and
+  ! makes this one block; the CPU default of 1 reduces these to single columns.  The sentinel is
+  ! resolved here rather than in kappa_shear_init so that CS is never modified.  These are the
+  ! arrays that are handed to kappa_shear_column, which takes their bounds as arguments rather
+  ! than assuming a staggering.
+  real, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     Idz, &      ! The inverse of the thickness of the merged layers [H-1 ~> m2 kg-1].
     h_lay, &    ! The layer thickness [H ~> m or kg m-2]
     dz_lay, &   ! The geometric layer thickness in height units [Z ~> m]
@@ -653,7 +653,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     S0xdz, &    ! The initial salinity times dz [S H ~> ppt m or ppt kg m-2]
     a1          ! a1 is the coupling between adjacent interfaces in the TKE,
                 ! velocity, and density equations [H ~> m or kg m-2]
-  real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: &
+  real, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
     kappa, &    ! The shear-driven diapycnal diffusivity at an interface [H Z T-1 ~> m2 s-1 or Pa s]
     tke, &      ! The Turbulent Kinetic Energy per unit mass at an interface [Z2 T-2 ~> m2 s-2].
     kappa_avg, & ! The time-weighted average of kappa [H Z T-1 ~> m2 s-1 or Pa s]
@@ -672,7 +673,9 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     Sal_int, &  ! The salinity interpolated to an interface [S ~> ppt].
     dbuoy_dT, & ! The partial derivative of buoyancy with changes in temperature [Z T-2 C-1 ~> m s-2 degC-1]
     dbuoy_dS, & ! The partial derivative of buoyancy with changes in salinity [Z T-2 S-1 ~> m s-2 ppt-1]
-    c1          ! c1 is used in the tridiagonal (and similar) solvers [nondim].
+    c1, &       ! c1 is used in the tridiagonal (and similar) solvers [nondim].
+    kappa_full, & ! kappa mapped back to the original interfaces [H Z T-1 ~> m2 s-1 or Pa s]
+    tke_full    ! tke mapped back to the original interfaces [Z2 T-2 ~> m2 s-2].
 
   real :: f2    ! The squared Coriolis parameter of each column [T-2 ~> s-2].
   real :: surface_pres  ! The top surface pressure [R L2 T-2 ~> Pa].
@@ -693,12 +696,17 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   logical :: use_temperature  !  If true, temperature and salinity have been
                         ! allocated and are being used as state variables.
 
-  integer, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: kc ! The index map between the original
+  integer, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
+                     merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
+    kc                  ! The index map between the original
                         ! interfaces and the interfaces with massless layers
                         ! merged into nearby massive layers.
-  real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: kf ! The fractional weight of interface kc+1 for
+  real, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
+    kf                  ! The fractional weight of interface kc+1 for
                         ! interpolating back to the original index space [nondim].
-  integer, dimension(SZIB_(G),SZJB_(G)) :: &
+  integer, dimension(merge(G%iecB-(G%isc-1)+1, CS%niblock, CS%niblock==0), &
+                     merge(G%jecB-(G%jsc-1)+1, CS%njblock, CS%njblock==0)) :: &
     nzc_2d              ! The number of layers in each column after massless layers
                         ! have been merged into nearby massive layers.
   integer, dimension(3,2) :: EOSdom  ! The 1-based domain of indices for the density derivatives
@@ -709,9 +717,16 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   real :: H_tiny        ! A sub-roundoff thickness to use in the denominator when calculating
                         ! thickness-weighted averages [H ~> m or kg m-2]
   integer :: IsB, IeB, JsB, JeB, i, j, k, nz, nzc
+  integer :: niblock, njblock  ! The block sizes actually used, with 0 resolved to the full domain.
+  integer :: istart, iend      ! First and last I indices of the current block.
+  integer :: jstart, jend      ! First and last J indices of the current block.
+  integer :: ii, jj            ! Block-local 1-based i and j indices.
 
   ! Diagnostics that should be deleted?
   isB = G%isc-1 ; ieB = G%iecB ; jsB = G%jsc-1 ; jeB = G%jecB ; nz = GV%ke
+
+  niblock = merge(IeB-IsB+1, CS%niblock, CS%niblock==0)
+  njblock = merge(JeB-JsB+1, CS%njblock, CS%njblock==0)
 
   use_temperature = associated(tv%T)
 
@@ -831,277 +846,291 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 ! Set up each column: merge massless layers, apply a timestep of background diffusion, and
 ! assemble the interface temperatures, salinities and pressures that the equation of state needs.
 !---------------------------------------
-  do concurrent( J=JsB:JeB, I=IsB:IeB ) DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1, k))
+  !   Everything from the massless-layer merge through the write-back is a per-column
+  ! calculation, so it is done a block at a time.  On the GPU the block is the whole domain and
+  ! this nest runs once; on the CPU it is a single column.
+  do jstart=JsB,JeB,njblock ; do istart=IsB,IeB,niblock
+    iend = min(istart + niblock - 1, IeB)
+    jend = min(jstart + njblock - 1, JeB)
 
-    !   The equation of state is evaluated over the whole (I,J,K) rectangle below, including land
-    ! points and interfaces deeper than nzc, so zero its inputs everywhere first rather than
-    ! letting it read whatever the uninitialized memory holds.  Only K=1:nzc are set below, and
-    ! only the results at K=2:nzc of wet columns are ever read.
-    do concurrent( K=1:nz+1 )
-      pressure(I,J,K) = 0.0 ; T_int(I,J,K) = 0.0 ; Sal_int(I,J,K) = 0.0
-    enddo
-    nzc_2d(I,J) = 0
+    do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) &
+        DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1, k, I, J))
+      I = istart + ii - 1 ; J = jstart + jj - 1
 
-    if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
-        (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
-      ! Store a transposed version of the initial arrays.
-      ! Any elimination of massless layers would occur here.
-      if (CS%eliminate_massless) then
-        nzc = 1
-        do k=1,nz
-          ! Zero out the thicknesses of all layers, even if they are unused.
-          h_lay(I,J,k) = 0.0 ; dz_lay(I,J,k) = 0.0 ; u0xdz(I,J,k) = 0.0 ; v0xdz(I,J,k) = 0.0
-          T0xdz(I,J,k) = 0.0 ; S0xdz(I,J,k) = 0.0
-
-          ! Add a new layer if this one has mass.
-!          if ((h_lay(I,J,nzc) > 0.0) .and. (h_vrt(I,J,k) > dz_massless)) nzc = nzc+1
-          if ((k>CS%nkml) .and. (h_lay(I,J,nzc) > 0.0) .and. &
-              (h_vrt(I,J,k) > dz_massless)) nzc = nzc+1
-
-          ! Only merge clusters of massless layers.
-!         if ((h_lay(I,J,nzc) > dz_massless) .or. &
-!             ((h_lay(I,J,nzc) > 0.0) .and. (h_vrt(I,J,k) > dz_massless))) nzc = nzc+1
-
-          kc(I,J,k) = nzc
-          h_lay(I,J,nzc) = h_lay(I,J,nzc) + h_vrt(I,J,k)
-          dz_lay(I,J,nzc) = dz_lay(I,J,nzc) + dz_vrt(I,J,k)
-          u0xdz(I,J,nzc) = u0xdz(I,J,nzc) + u_vrt(I,J,k)*h_vrt(I,J,k)
-          v0xdz(I,J,nzc) = v0xdz(I,J,nzc) + v_vrt(I,J,k)*h_vrt(I,J,k)
-          if (use_temperature) then
-            T0xdz(I,J,nzc) = T0xdz(I,J,nzc) + T_vrt(I,J,k)*h_vrt(I,J,k)
-            S0xdz(I,J,nzc) = S0xdz(I,J,nzc) + S_vrt(I,J,k)*h_vrt(I,J,k)
-          else
-            T0xdz(I,J,nzc) = T0xdz(I,J,nzc) + rho_vrt(I,J,k)*h_vrt(I,J,k)
-            S0xdz(I,J,nzc) = S0xdz(I,J,nzc) + rho_vrt(I,J,k)*h_vrt(I,J,k)
-          endif
-        enddo
-        kc(I,J,nz+1) = nzc+1
-
-        ! Set up Idz as the inverse of layer thicknesses.
-        do concurrent( k=1:nzc )
-          Idz(I,J,k) = 1.0 / h_lay(I,J,k)
-        enddo
-
-        !   Now determine kf, the fractional weight of interface kc when
-        ! interpolating between interfaces kc and kc+1.
-        kf(I,J,1) = 0.0 ; dz_in_lay = h_vrt(I,J,1)
-        do k=2,nz
-          if (kc(I,J,k) > kc(I,J,k-1)) then
-            kf(I,J,k) = 0.0 ; dz_in_lay = h_vrt(I,J,k)
-          else
-            kf(I,J,k) = dz_in_lay*Idz(I,J,kc(I,J,k)) ; dz_in_lay = dz_in_lay + h_vrt(I,J,k)
-          endif
-        enddo
-        kf(I,J,nz+1) = 0.0
-      else
-        do concurrent( k=1:nz )
-          h_lay(I,J,k) = h_vrt(I,J,k)
-          dz_lay(I,J,k) = dz_vrt(I,J,k)
-          u0xdz(I,J,k) = u_vrt(I,J,k)*h_lay(I,J,k) ; v0xdz(I,J,k) = v_vrt(I,J,k)*h_lay(I,J,k)
-        enddo
-        if (use_temperature) then
-          do concurrent( k=1:nz )
-            T0xdz(I,J,k) = T_vrt(I,J,k)*h_lay(I,J,k) ; S0xdz(I,J,k) = S_vrt(I,J,k)*h_lay(I,J,k)
-          enddo
-        else
-          do concurrent( k=1:nz )
-            T0xdz(I,J,k) = rho_vrt(I,J,k)*h_lay(I,J,k) ; S0xdz(I,J,k) = rho_vrt(I,J,k)*h_lay(I,J,k)
-          enddo
-        endif
-        nzc = nz
-        do concurrent( k=1:nzc+1 )
-          kc(I,J,k) = k
-          kf(I,J,k) = 0.0
-        enddo
-      endif
-
-      !   Set up I_dz_int as the inverse of the distance between adjacent layer centers, for
-      ! applying the background diffusivity.
-      I_dz_int(I,J,1) = 2.0 / dz_lay(I,J,1)
-      do concurrent( K=2:nzc )
-        I_dz_int(I,J,K) = 2.0 / (dz_lay(I,J,K-1) + dz_lay(I,J,K))
-      enddo
-      I_dz_int(I,J,nzc+1) = 2.0 / dz_lay(I,J,nzc)
-
-      !   Determine the velocities and thermodynamic tracers after eliminating massless layers
-      ! and applying a time-step of background diffusion.
-      if (nzc > 1) then
-        a1(I,J,2) = k0dt*I_dz_int(I,J,2)
-        b1 = 1.0 / (h_lay(I,J,1) + a1(I,J,2))
-        u(I,J,1) = b1 * u0xdz(I,J,1) ; v(I,J,1) = b1 * v0xdz(I,J,1)
-        T(I,J,1) = b1 * T0xdz(I,J,1) ; Sal(I,J,1) = b1 * S0xdz(I,J,1)
-        c1(I,J,2) = a1(I,J,2) * b1 ; d1 = h_lay(I,J,1) * b1 ! = 1 - c1
-        do k=2,nzc-1
-          bd1 = h_lay(I,J,k) + d1*a1(I,J,k)
-          a1(I,J,k+1) = k0dt*I_dz_int(I,J,k+1)
-          b1 = 1.0 / (bd1 + a1(I,J,k+1))
-          u(I,J,k) = b1 * (u0xdz(I,J,k) + a1(I,J,k)*u(I,J,k-1))
-          v(I,J,k) = b1 * (v0xdz(I,J,k) + a1(I,J,k)*v(I,J,k-1))
-          T(I,J,k) = b1 * (T0xdz(I,J,k) + a1(I,J,k)*T(I,J,k-1))
-          Sal(I,J,k) = b1 * (S0xdz(I,J,k) + a1(I,J,k)*Sal(I,J,k-1))
-          c1(I,J,k+1) = a1(I,J,k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
-        enddo
-        ! rho or T and S have insulating boundary conditions, u & v use no-slip
-        ! bottom boundary conditions (if kappa0 > 0).
-        ! For no-slip bottom boundary conditions
-        b1 = 1.0 / ((h_lay(I,J,nzc) + d1*a1(I,J,nzc)) + k0dt*I_dz_int(I,J,nzc+1))
-        u(I,J,nzc) = b1 * (u0xdz(I,J,nzc) + a1(I,J,nzc)*u(I,J,nzc-1))
-        v(I,J,nzc) = b1 * (v0xdz(I,J,nzc) + a1(I,J,nzc)*v(I,J,nzc-1))
-        ! For insulating boundary conditions
-        b1 = 1.0 / (h_lay(I,J,nzc) + d1*a1(I,J,nzc))
-        T(I,J,nzc) = b1 * (T0xdz(I,J,nzc) + a1(I,J,nzc)*T(I,J,nzc-1))
-        Sal(I,J,nzc) = b1 * (S0xdz(I,J,nzc) + a1(I,J,nzc)*Sal(I,J,nzc-1))
-        do k=nzc-1,1,-1
-          u(I,J,k) = u(I,J,k) + c1(I,J,k+1)*u(I,J,k+1)
-          v(I,J,k) = v(I,J,k) + c1(I,J,k+1)*v(I,J,k+1)
-          T(I,J,k) = T(I,J,k) + c1(I,J,k+1)*T(I,J,k+1)
-          Sal(I,J,k) = Sal(I,J,k) + c1(I,J,k+1)*Sal(I,J,k+1)
-        enddo
-      else
-        ! This is correct, but probably unnecessary.
-        b1 = 1.0 / (h_lay(I,J,1) + k0dt*I_dz_int(I,J,2))
-        u(I,J,1) = b1 * u0xdz(I,J,1) ; v(I,J,1) = b1 * v0xdz(I,J,1)
-        b1 = 1.0 / h_lay(I,J,1)
-        T(I,J,1) = b1 * T0xdz(I,J,1) ; Sal(I,J,1) = b1 * S0xdz(I,J,1)
-      endif
-
-      ! Get T, S and pressure at the interfaces for calculating dbuoy_dT and dbuoy_dS.
-      surface_pres = 0.0
-      if (associated(p_surf)) then
-        if (CS%psurf_bug) then
-          ! This is wrong because it is averaging values from land in some places.
-          surface_pres = 0.25 * ((p_surf(i,j) + p_surf(i+1,j+1)) + &
-                                 (p_surf(i+1,j) + p_surf(i,j+1)))
-        else
-          surface_pres = ((G%mask2dT(i,j) * p_surf(i,j) + G%mask2dT(i+1,j+1) * p_surf(i+1,j+1)) + &
-                          (G%mask2dT(i+1,j) * p_surf(i+1,j) + G%mask2dT(i,j+1) * p_surf(i,j+1)) ) / &
-                         ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
-                          (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
-        endif
-      endif
-      if (use_temperature) then
-        pressure(I,J,1) = surface_pres
-        do concurrent( k=2:nzc )
-          pressure(I,J,k) = pressure(I,J,k-1) + gR0*h_lay(I,J,k-1)
-          T_int(I,J,k) = 0.5*(T(I,J,k-1) + T(I,J,k))
-          Sal_int(I,J,k) = 0.5*(Sal(I,J,k-1) + Sal(I,J,k))
-        enddo
-      endif
-
-      ! Save the number of merged layers for the stages below.
-      nzc_2d(I,J) = nzc
-    endif
-  enddo ! end of the setup I- and J-loops
-
-  ! Calculate the thermodynamic coefficients for all of the vertex columns at once.
-  if (use_temperature) then
-    if (GV%Boussinesq .or. GV%semi_Boussinesq) then
-      !   calculate_density_derivs takes assumed-shape arguments, so its domain is expressed in
-      ! 1-based indices; at vertices the arrays start at IsdB/JsdB rather than 1.
-      EOSdom(1,1) = IsB - G%IsdB + 1 ; EOSdom(1,2) = IeB - G%IsdB + 1
-      EOSdom(2,1) = JsB - G%JsdB + 1 ; EOSdom(2,2) = JeB - G%JsdB + 1
-      EOSdom(3,1) = 2 ; EOSdom(3,2) = nz
-      call calculate_density_derivs(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
-                                    tv%eqn_of_state, EOSdom, scale=-g_R0 )
-    endif
-  endif
-
-!---------------------------------------
-! Work on each column.
-!---------------------------------------
-  do concurrent( J=JsB:JeB, I=IsB:IeB ) DO_LOCALITY(local(nzc, f2, k ))
-    if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
-        (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
-      nzc = nzc_2d(I,J)
-      f2 = G%Coriolis2Bu(I,J)
-
-    ! ----------------------------------------------------
-    ! Set the initial guess for kappa, here defined at interfaces.
-    ! ----------------------------------------------------
-      do K=1,nzc+1 ; kappa(I,J,K) = CS%kappa_seed ; enddo
-
-      call kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, &
-                              h_lay, dz_lay, I_dz_int, kappa_avg, u, v, T, Sal, &
-                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-                              CS, GV, US, G%IsdB, G%IedB, G%JsdB, G%JedB, I, J)
-
-    ! Extrapolate from the vertically reduced grid back to the original layers.
-      if (nz == nzc) then
-        do concurrent( K=1:nz+1 )
-          kappa_full(I,J,K) = kappa_avg(I,J,K)
-          if (CS%all_layer_TKE_bug) then
-            tke_full(I,J,K) = tke(I,J,K)
-          else
-            tke_full(I,J,K) = tke_avg(I,J,K)
-          endif
-        enddo
-        if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
-          diag_N2_mean(I,J,K) = N2_mean(I,J,K)
-        enddo ; endif
-        if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
-          diag_S2_mean(I,J,K) = S2_mean(I,J,K)
-        enddo ; endif
-        if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
-          diag_N2_init(I,J,K) = N2_init(I,J,K)
-        enddo ; endif
-        if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
-          diag_S2_init(I,J,K) = S2_init(I,J,K)
-        enddo ; endif
-      else
-        do concurrent( K=1:nz+1 )
-          if (kf(I,J,K) == 0.0) then
-            kappa_full(I,J,K) = kappa_avg(I,J,kc(I,J,K))
-            tke_full(I,J,K) = tke_avg(I,J,kc(I,J,K))
-          else
-            kappa_full(I,J,K) = (1.0-kf(I,J,K)) * kappa_avg(I,J,kc(I,J,K)) + &
-                                kf(I,J,K) * kappa_avg(I,J,kc(I,J,K)+1)
-            tke_full(I,J,K) = (1.0-kf(I,J,K)) * tke_avg(I,J,kc(I,J,K)) + &
-                              kf(I,J,K) * tke_avg(I,J,kc(I,J,K)+1)
-          endif
-        enddo
-        do concurrent( K=1:nz+1 )
-          if (kf(I,J,K) == 0.0) then
-            if (CS%id_N2_mean>0) diag_N2_mean(I,J,K) = N2_mean(I,J,kc(I,J,K))
-            if (CS%id_S2_mean>0) diag_S2_mean(I,J,K) = S2_mean(I,J,kc(I,J,K))
-            if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(I,J,K) = N2_init(I,J,kc(I,J,K))
-            if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(I,J,K) = S2_init(I,J,kc(I,J,K))
-          else
-            if (CS%id_N2_mean>0) &
-              diag_N2_mean(I,J,K) = (1.0-kf(I,J,K)) * N2_mean(I,J,kc(I,J,K)) + &
-                                    kf(I,J,K) * N2_mean(I,J,kc(I,J,K)+1)
-            if (CS%id_S2_mean>0) &
-              diag_S2_mean(I,J,K) = (1.0-kf(I,J,K)) * S2_mean(I,J,kc(I,J,K)) + &
-                                    kf(I,J,K) * S2_mean(I,J,kc(I,J,K)+1)
-            if ((CS%id_N2_init>0) .or. CS%debug) &
-              diag_N2_init(I,J,K) = (1.0-kf(I,J,K)) * N2_init(I,J,kc(I,J,K)) + &
-                                    kf(I,J,K) * N2_init(I,J,kc(I,J,K)+1)
-            if ((CS%id_S2_init>0) .or. CS%debug) &
-              diag_S2_init(I,J,K) = (1.0-kf(I,J,K)) * S2_init(I,J,kc(I,J,K)) + &
-                                    kf(I,J,K) * S2_init(I,J,kc(I,J,K)+1)
-          endif
-        enddo
-      endif
-    else  ! Land points.
+      !   The equation of state is evaluated over the whole (I,J,K) rectangle below, including land
+      ! points and interfaces deeper than nzc, so zero its inputs everywhere first rather than
+      ! letting it read whatever the uninitialized memory holds.  Only K=1:nzc are set below, and
+      ! only the results at K=2:nzc of wet columns are ever read.
       do concurrent( K=1:nz+1 )
-        kappa_full(I,J,K) = 0.0 ; tke_full(I,J,K) = 0.0
+        pressure(ii,jj,K) = 0.0 ; T_int(ii,jj,K) = 0.0 ; Sal_int(ii,jj,K) = 0.0
+      enddo
+      nzc_2d(ii,jj) = 0
+
+      if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
+          (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
+        ! Store a transposed version of the initial arrays.
+        ! Any elimination of massless layers would occur here.
+        if (CS%eliminate_massless) then
+          nzc = 1
+          do k=1,nz
+            ! Zero out the thicknesses of all layers, even if they are unused.
+            h_lay(ii,jj,k) = 0.0 ; dz_lay(ii,jj,k) = 0.0 ; u0xdz(ii,jj,k) = 0.0 ; v0xdz(ii,jj,k) = 0.0
+            T0xdz(ii,jj,k) = 0.0 ; S0xdz(ii,jj,k) = 0.0
+
+            ! Add a new layer if this one has mass.
+  !          if ((h_lay(ii,jj,nzc) > 0.0) .and. (h_vrt(I,J,k) > dz_massless)) nzc = nzc+1
+            if ((k>CS%nkml) .and. (h_lay(ii,jj,nzc) > 0.0) .and. &
+                (h_vrt(I,J,k) > dz_massless)) nzc = nzc+1
+
+            ! Only merge clusters of massless layers.
+  !         if ((h_lay(ii,jj,nzc) > dz_massless) .or. &
+  !             ((h_lay(ii,jj,nzc) > 0.0) .and. (h_vrt(I,J,k) > dz_massless))) nzc = nzc+1
+
+            kc(ii,jj,k) = nzc
+            h_lay(ii,jj,nzc) = h_lay(ii,jj,nzc) + h_vrt(I,J,k)
+            dz_lay(ii,jj,nzc) = dz_lay(ii,jj,nzc) + dz_vrt(I,J,k)
+            u0xdz(ii,jj,nzc) = u0xdz(ii,jj,nzc) + u_vrt(I,J,k)*h_vrt(I,J,k)
+            v0xdz(ii,jj,nzc) = v0xdz(ii,jj,nzc) + v_vrt(I,J,k)*h_vrt(I,J,k)
+            if (use_temperature) then
+              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + T_vrt(I,J,k)*h_vrt(I,J,k)
+              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + S_vrt(I,J,k)*h_vrt(I,J,k)
+            else
+              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + rho_vrt(I,J,k)*h_vrt(I,J,k)
+              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + rho_vrt(I,J,k)*h_vrt(I,J,k)
+            endif
+          enddo
+          kc(ii,jj,nz+1) = nzc+1
+
+          ! Set up Idz as the inverse of layer thicknesses.
+          do concurrent( k=1:nzc )
+            Idz(ii,jj,k) = 1.0 / h_lay(ii,jj,k)
+          enddo
+
+          !   Now determine kf, the fractional weight of interface kc when
+          ! interpolating between interfaces kc and kc+1.
+          kf(ii,jj,1) = 0.0 ; dz_in_lay = h_vrt(I,J,1)
+          do k=2,nz
+            if (kc(ii,jj,k) > kc(ii,jj,k-1)) then
+              kf(ii,jj,k) = 0.0 ; dz_in_lay = h_vrt(I,J,k)
+            else
+              kf(ii,jj,k) = dz_in_lay*Idz(ii,jj,kc(ii,jj,k)) ; dz_in_lay = dz_in_lay + h_vrt(I,J,k)
+            endif
+          enddo
+          kf(ii,jj,nz+1) = 0.0
+        else
+          do concurrent( k=1:nz )
+            h_lay(ii,jj,k) = h_vrt(I,J,k)
+            dz_lay(ii,jj,k) = dz_vrt(I,J,k)
+            u0xdz(ii,jj,k) = u_vrt(I,J,k)*h_lay(ii,jj,k) ; v0xdz(ii,jj,k) = v_vrt(I,J,k)*h_lay(ii,jj,k)
+          enddo
+          if (use_temperature) then
+            do concurrent( k=1:nz )
+              T0xdz(ii,jj,k) = T_vrt(I,J,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = S_vrt(I,J,k)*h_lay(ii,jj,k)
+            enddo
+          else
+            do concurrent( k=1:nz )
+              T0xdz(ii,jj,k) = rho_vrt(I,J,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = rho_vrt(I,J,k)*h_lay(ii,jj,k)
+            enddo
+          endif
+          nzc = nz
+          do concurrent( k=1:nzc+1 )
+            kc(ii,jj,k) = k
+            kf(ii,jj,k) = 0.0
+          enddo
+        endif
+
+        !   Set up I_dz_int as the inverse of the distance between adjacent layer centers, for
+        ! applying the background diffusivity.
+        I_dz_int(ii,jj,1) = 2.0 / dz_lay(ii,jj,1)
+        do concurrent( K=2:nzc )
+          I_dz_int(ii,jj,K) = 2.0 / (dz_lay(ii,jj,K-1) + dz_lay(ii,jj,K))
+        enddo
+        I_dz_int(ii,jj,nzc+1) = 2.0 / dz_lay(ii,jj,nzc)
+
+        !   Determine the velocities and thermodynamic tracers after eliminating massless layers
+        ! and applying a time-step of background diffusion.
+        if (nzc > 1) then
+          a1(ii,jj,2) = k0dt*I_dz_int(ii,jj,2)
+          b1 = 1.0 / (h_lay(ii,jj,1) + a1(ii,jj,2))
+          u(ii,jj,1) = b1 * u0xdz(ii,jj,1) ; v(ii,jj,1) = b1 * v0xdz(ii,jj,1)
+          T(ii,jj,1) = b1 * T0xdz(ii,jj,1) ; Sal(ii,jj,1) = b1 * S0xdz(ii,jj,1)
+          c1(ii,jj,2) = a1(ii,jj,2) * b1 ; d1 = h_lay(ii,jj,1) * b1 ! = 1 - c1
+          do k=2,nzc-1
+            bd1 = h_lay(ii,jj,k) + d1*a1(ii,jj,k)
+            a1(ii,jj,k+1) = k0dt*I_dz_int(ii,jj,k+1)
+            b1 = 1.0 / (bd1 + a1(ii,jj,k+1))
+            u(ii,jj,k) = b1 * (u0xdz(ii,jj,k) + a1(ii,jj,k)*u(ii,jj,k-1))
+            v(ii,jj,k) = b1 * (v0xdz(ii,jj,k) + a1(ii,jj,k)*v(ii,jj,k-1))
+            T(ii,jj,k) = b1 * (T0xdz(ii,jj,k) + a1(ii,jj,k)*T(ii,jj,k-1))
+            Sal(ii,jj,k) = b1 * (S0xdz(ii,jj,k) + a1(ii,jj,k)*Sal(ii,jj,k-1))
+            c1(ii,jj,k+1) = a1(ii,jj,k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
+          enddo
+          ! rho or T and S have insulating boundary conditions, u & v use no-slip
+          ! bottom boundary conditions (if kappa0 > 0).
+          ! For no-slip bottom boundary conditions
+          b1 = 1.0 / ((h_lay(ii,jj,nzc) + d1*a1(ii,jj,nzc)) + k0dt*I_dz_int(ii,jj,nzc+1))
+          u(ii,jj,nzc) = b1 * (u0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*u(ii,jj,nzc-1))
+          v(ii,jj,nzc) = b1 * (v0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*v(ii,jj,nzc-1))
+          ! For insulating boundary conditions
+          b1 = 1.0 / (h_lay(ii,jj,nzc) + d1*a1(ii,jj,nzc))
+          T(ii,jj,nzc) = b1 * (T0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*T(ii,jj,nzc-1))
+          Sal(ii,jj,nzc) = b1 * (S0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*Sal(ii,jj,nzc-1))
+          do k=nzc-1,1,-1
+            u(ii,jj,k) = u(ii,jj,k) + c1(ii,jj,k+1)*u(ii,jj,k+1)
+            v(ii,jj,k) = v(ii,jj,k) + c1(ii,jj,k+1)*v(ii,jj,k+1)
+            T(ii,jj,k) = T(ii,jj,k) + c1(ii,jj,k+1)*T(ii,jj,k+1)
+            Sal(ii,jj,k) = Sal(ii,jj,k) + c1(ii,jj,k+1)*Sal(ii,jj,k+1)
+          enddo
+        else
+          ! This is correct, but probably unnecessary.
+          b1 = 1.0 / (h_lay(ii,jj,1) + k0dt*I_dz_int(ii,jj,2))
+          u(ii,jj,1) = b1 * u0xdz(ii,jj,1) ; v(ii,jj,1) = b1 * v0xdz(ii,jj,1)
+          b1 = 1.0 / h_lay(ii,jj,1)
+          T(ii,jj,1) = b1 * T0xdz(ii,jj,1) ; Sal(ii,jj,1) = b1 * S0xdz(ii,jj,1)
+        endif
+
+        ! Get T, S and pressure at the interfaces for calculating dbuoy_dT and dbuoy_dS.
+        surface_pres = 0.0
+        if (associated(p_surf)) then
+          if (CS%psurf_bug) then
+            ! This is wrong because it is averaging values from land in some places.
+            surface_pres = 0.25 * ((p_surf(i,j) + p_surf(i+1,j+1)) + &
+                                   (p_surf(i+1,j) + p_surf(i,j+1)))
+          else
+            surface_pres = ((G%mask2dT(i,j) * p_surf(i,j) + G%mask2dT(i+1,j+1) * p_surf(i+1,j+1)) + &
+                            (G%mask2dT(i+1,j) * p_surf(i+1,j) + G%mask2dT(i,j+1) * p_surf(i,j+1)) ) / &
+                           ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
+                            (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
+          endif
+        endif
+        if (use_temperature) then
+          pressure(ii,jj,1) = surface_pres
+          do concurrent( k=2:nzc )
+            pressure(ii,jj,k) = pressure(ii,jj,k-1) + gR0*h_lay(ii,jj,k-1)
+            T_int(ii,jj,k) = 0.5*(T(ii,jj,k-1) + T(ii,jj,k))
+            Sal_int(ii,jj,k) = 0.5*(Sal(ii,jj,k-1) + Sal(ii,jj,k))
+          enddo
+        endif
+
+        ! Save the number of merged layers for the stages below.
+        nzc_2d(ii,jj) = nzc
+      endif
+    enddo ! end of the setup I- and J-loops
+
+    ! Calculate the thermodynamic coefficients for all of the vertex columns at once.
+    if (use_temperature) then
+      if (GV%Boussinesq .or. GV%semi_Boussinesq) then
+        !   calculate_density_derivs takes assumed-shape arguments, so its domain is expressed in
+        ! 1-based indices, which the block-local arrays already are.
+        EOSdom(1,1) = 1 ; EOSdom(1,2) = iend - istart + 1
+        EOSdom(2,1) = 1 ; EOSdom(2,2) = jend - jstart + 1
+        EOSdom(3,1) = 2 ; EOSdom(3,2) = nz
+        call calculate_density_derivs(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
+                                      tv%eqn_of_state, EOSdom, scale=-g_R0 )
+      endif
+    endif
+
+  !---------------------------------------
+  ! Work on each column.
+  !---------------------------------------
+    do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(nzc, f2, k, I, J))
+      I = istart + ii - 1 ; J = jstart + jj - 1
+      if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
+          (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
+        nzc = nzc_2d(ii,jj)
+        f2 = G%Coriolis2Bu(I,J)
+
+      ! ----------------------------------------------------
+      ! Set the initial guess for kappa, here defined at interfaces.
+      ! ----------------------------------------------------
+        do K=1,nzc+1 ; kappa(ii,jj,K) = CS%kappa_seed ; enddo
+
+        call kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, &
+                                h_lay, dz_lay, I_dz_int, kappa_avg, u, v, T, Sal, &
+                                tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+                                CS, GV, US, 1, niblock, 1, njblock, ii, jj)
+
+      ! Extrapolate from the vertically reduced grid back to the original layers.
+        if (nz == nzc) then
+          do concurrent( K=1:nz+1 )
+            kappa_full(ii,jj,K) = kappa_avg(ii,jj,K)
+            if (CS%all_layer_TKE_bug) then
+              tke_full(ii,jj,K) = tke(ii,jj,K)
+            else
+              tke_full(ii,jj,K) = tke_avg(ii,jj,K)
+            endif
+          enddo
+          if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
+            diag_N2_mean(I,J,K) = N2_mean(ii,jj,K)
+          enddo ; endif
+          if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
+            diag_S2_mean(I,J,K) = S2_mean(ii,jj,K)
+          enddo ; endif
+          if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+            diag_N2_init(I,J,K) = N2_init(ii,jj,K)
+          enddo ; endif
+          if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+            diag_S2_init(I,J,K) = S2_init(ii,jj,K)
+          enddo ; endif
+        else
+          do concurrent( K=1:nz+1 )
+            if (kf(ii,jj,K) == 0.0) then
+              kappa_full(ii,jj,K) = kappa_avg(ii,jj,kc(ii,jj,K))
+              tke_full(ii,jj,K) = tke_avg(ii,jj,kc(ii,jj,K))
+            else
+              kappa_full(ii,jj,K) = (1.0-kf(ii,jj,K)) * kappa_avg(ii,jj,kc(ii,jj,K)) + &
+                                  kf(ii,jj,K) * kappa_avg(ii,jj,kc(ii,jj,K)+1)
+              tke_full(ii,jj,K) = (1.0-kf(ii,jj,K)) * tke_avg(ii,jj,kc(ii,jj,K)) + &
+                                kf(ii,jj,K) * tke_avg(ii,jj,kc(ii,jj,K)+1)
+            endif
+          enddo
+          do concurrent( K=1:nz+1 )
+            if (kf(ii,jj,K) == 0.0) then
+              if (CS%id_N2_mean>0) diag_N2_mean(I,J,K) = N2_mean(ii,jj,kc(ii,jj,K))
+              if (CS%id_S2_mean>0) diag_S2_mean(I,J,K) = S2_mean(ii,jj,kc(ii,jj,K))
+              if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(I,J,K) = N2_init(ii,jj,kc(ii,jj,K))
+              if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(I,J,K) = S2_init(ii,jj,kc(ii,jj,K))
+            else
+              if (CS%id_N2_mean>0) &
+                diag_N2_mean(I,J,K) = (1.0-kf(ii,jj,K)) * N2_mean(ii,jj,kc(ii,jj,K)) + &
+                                      kf(ii,jj,K) * N2_mean(ii,jj,kc(ii,jj,K)+1)
+              if (CS%id_S2_mean>0) &
+                diag_S2_mean(I,J,K) = (1.0-kf(ii,jj,K)) * S2_mean(ii,jj,kc(ii,jj,K)) + &
+                                      kf(ii,jj,K) * S2_mean(ii,jj,kc(ii,jj,K)+1)
+              if ((CS%id_N2_init>0) .or. CS%debug) &
+                diag_N2_init(I,J,K) = (1.0-kf(ii,jj,K)) * N2_init(ii,jj,kc(ii,jj,K)) + &
+                                      kf(ii,jj,K) * N2_init(ii,jj,kc(ii,jj,K)+1)
+              if ((CS%id_S2_init>0) .or. CS%debug) &
+                diag_S2_init(I,J,K) = (1.0-kf(ii,jj,K)) * S2_init(ii,jj,kc(ii,jj,K)) + &
+                                      kf(ii,jj,K) * S2_init(ii,jj,kc(ii,jj,K)+1)
+            endif
+          enddo
+        endif
+      else  ! Land points.
+        do concurrent( K=1:nz+1 )
+          kappa_full(ii,jj,K) = 0.0 ; tke_full(ii,jj,K) = 0.0
+        enddo
+      endif
+    enddo ! end of the column I- and J-loops
+
+    ! Store the results for restarts or interpolation back to tracer points.
+    if (CS%VS_viscosity_bug) then
+      do concurrent( K=1:nz+1, jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(I, J))
+        I = istart + ii - 1 ; J = jstart + jj - 1
+        kappa_vertex(I,J,K) = kappa_full(ii,jj,K)
+        tke_io(I,J,K) = G%mask2dBu(I,J) * tke_full(ii,jj,K)
+        kv_io(I,J,K) = ( G%mask2dBu(I,J) * kappa_vertex(I,J,K) ) * Prandtl_turb
+      enddo
+    else
+      do concurrent( K=1:nz+1, jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(I, J))
+        I = istart + ii - 1 ; J = jstart + jj - 1
+        kappa_vertex(I,J,K) = kappa_full(ii,jj,K)
+        tke_io(I,J,K) = tke_full(ii,jj,K)
+        kv_io(I,J,K) = kappa_vertex(I,J,K) * Prandtl_turb
       enddo
     endif
-  enddo ! end of the column I- and J-loops
 
-  ! Store the results for restarts or interpolation back to tracer points.
-  if (CS%VS_viscosity_bug) then
-    do concurrent( K=1:nz+1, J=JsB:JeB, I=IsB:IeB )
-      kappa_vertex(I,J,K) = kappa_full(I,J,K)
-      tke_io(I,J,K) = G%mask2dBu(I,J) * tke_full(I,J,K)
-      kv_io(I,J,K) = ( G%mask2dBu(I,J) * kappa_vertex(I,J,K) ) * Prandtl_turb
-    enddo
-  else
-    do concurrent( K=1:nz+1, J=JsB:JeB, I=IsB:IeB )
-      kappa_vertex(I,J,K) = kappa_full(I,J,K)
-      tke_io(I,J,K) = tke_full(I,J,K)
-      kv_io(I,J,K) = kappa_vertex(I,J,K) * Prandtl_turb
-    enddo
-  endif
+  enddo ; enddo ! end of the i- and j-block loops
 
   ! Set the diffusivities in tracer columns from the values at vertices.
 
