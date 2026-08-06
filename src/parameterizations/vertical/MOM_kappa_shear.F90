@@ -466,26 +466,53 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
         EOSdom(3,1) = 2 ; EOSdom(3,2) = nz
         call calculate_density_derivs(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
                                       tv%eqn_of_state, EOSdom, scale=-g_R0 )
-      ! else
+      else
         ! These should perhaps be combined into a single call to calculate the thermal expansion
         ! and haline contraction coefficients?
-        ! call calculate_specific_vol_derivs(T_int, Sal_int, pressure, dSpV_dT, dSpV_dS, &
-        !                               tv%eqn_of_state, (/2,nzc/) )
-        ! call calculate_density(T_int, Sal_int, pressure, rho_int, tv%eqn_of_state, (/2,nzc/) )
-        ! do K=2,nzc
-        !   dbuoy_dT(ii,jj,K) = GV%g_Earth_Z_T2 * (rho_int(ii,jj,K) * dSpV_dT(K))
-        !   dbuoy_dS(ii,jj,K) = GV%g_Earth_Z_T2 * (rho_int(ii,jj,K) * dSpV_dS(K))
-        ! enddo
+        !   calculate_specific_vol_derivs has only a 1-d implementation, and the 3-d form of
+        ! calculate_density uses whole-array assignments that are not safe under
+        ! -gpu=mem:separate, so this branch runs on the host.  It is not reached by any
+        ! configuration that is currently run on the device, so the round trip costs nothing
+        ! there.
+        !$omp target update from(T_int, Sal_int, pressure, nzc_2d)
+        do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
+          if (G%mask2dT(istart+ii-1, jstart+jj-1) > 0.0) then
+            nzc = nzc_2d(ii,jj)
+            call calculate_specific_vol_derivs(T_int(ii,jj,:), Sal_int(ii,jj,:), pressure(ii,jj,:), &
+                                          dSpV_dT(ii,jj,:), dSpV_dS(ii,jj,:), tv%eqn_of_state, (/2,nzc/) )
+            call calculate_density(T_int(ii,jj,:), Sal_int(ii,jj,:), pressure(ii,jj,:), &
+                                   rho_int(ii,jj,:), tv%eqn_of_state, (/2,nzc/) )
+            do K=2,nzc
+              dbuoy_dT(ii,jj,K) = GV%g_Earth_Z_T2 * (rho_int(ii,jj,K) * dSpV_dT(ii,jj,K))
+              dbuoy_dS(ii,jj,K) = GV%g_Earth_Z_T2 * (rho_int(ii,jj,K) * dSpV_dS(ii,jj,K))
+            enddo
+          endif
+        enddo ; enddo
+        !$omp target update to(dbuoy_dT, dbuoy_dS)
       endif
-    ! elseif (GV%Boussinesq .or. GV%semi_Boussinesq) then
-    !   do K=1,nzc+1 ; dbuoy_dT(ii,jj,K) = -g_R0 ; dbuoy_dS(ii,jj,K) = 0.0 ; enddo
-    ! else
-    !   do K=1,nzc+1 ; dbuoy_dS(ii,jj,K) = 0.0 ; enddo
-    !   dbuoy_dT(ii,jj,1) = -GV%g_Earth_Z_T2 / GV%Rlay(1)
-    !   do K=2,nzc
-    !     dbuoy_dT(ii,jj,K) = -GV%g_Earth_Z_T2 / (0.5*(GV%Rlay(K-1) + GV%Rlay(K)))
-    !   enddo
-    !   dbuoy_dT(ii,jj,nzc+1) = -GV%g_Earth_Z_T2 / GV%Rlay(nzc)
+    elseif (GV%Boussinesq .or. GV%semi_Boussinesq) then
+      !$omp target update from(nzc_2d)
+      do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
+        if (G%mask2dT(istart+ii-1, jstart+jj-1) > 0.0) then
+          nzc = nzc_2d(ii,jj)
+          do K=1,nzc+1 ; dbuoy_dT(ii,jj,K) = -g_R0 ; dbuoy_dS(ii,jj,K) = 0.0 ; enddo
+        endif
+      enddo ; enddo
+      !$omp target update to(dbuoy_dT, dbuoy_dS)
+    else
+      !$omp target update from(nzc_2d)
+      do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
+        if (G%mask2dT(istart+ii-1, jstart+jj-1) > 0.0) then
+          nzc = nzc_2d(ii,jj)
+          do K=1,nzc+1 ; dbuoy_dS(ii,jj,K) = 0.0 ; enddo
+          dbuoy_dT(ii,jj,1) = -GV%g_Earth_Z_T2 / GV%Rlay(1)
+          do K=2,nzc
+            dbuoy_dT(ii,jj,K) = -GV%g_Earth_Z_T2 / (0.5*(GV%Rlay(K-1) + GV%Rlay(K)))
+          enddo
+          dbuoy_dT(ii,jj,nzc+1) = -GV%g_Earth_Z_T2 / GV%Rlay(nzc)
+        endif
+      enddo ; enddo
+      !$omp target update to(dbuoy_dT, dbuoy_dS)
     endif
 
     do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local( f2, k, i, j ))
@@ -706,6 +733,9 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     Sal_int, &  ! The salinity interpolated to an interface [S ~> ppt].
     dbuoy_dT, & ! The partial derivative of buoyancy with changes in temperature [Z T-2 C-1 ~> m s-2 degC-1]
     dbuoy_dS, & ! The partial derivative of buoyancy with changes in salinity [Z T-2 S-1 ~> m s-2 ppt-1]
+    dSpV_dT, &  ! The partial derivative of specific volume with changes in temperature [R-1 C-1 ~> m3 kg-1 degC-1]
+    dSpV_dS, &  ! The partial derivative of specific volume with changes in salinity [R-1 S-1 ~> m3 kg-1 ppt-1]
+    rho_int, &  ! The in situ density interpolated to an interface [R ~> kg m-3]
     c1, &       ! c1 is used in the tridiagonal (and similar) solvers [nondim].
     kappa_full, & ! kappa mapped back to the original interfaces [H Z T-1 ~> m2 s-1 or Pa s]
     tke_full    ! tke mapped back to the original interfaces [Z2 T-2 ~> m2 s-2].
@@ -781,6 +811,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !$omp target enter data map(alloc: Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
   !$omp &                 kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
   !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
+  !$omp &                 dSpV_dT, dSpV_dS, rho_int, &
   !$omp &                 c1, kc, kf, nzc_2d)
 
   if (CS%debug .or. CS%id_N2_init>0) then
@@ -1060,7 +1091,54 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         EOSdom(3,1) = 2 ; EOSdom(3,2) = nz
         call calculate_density_derivs(T_int, Sal_int, pressure, dbuoy_dT, dbuoy_dS, &
                                       tv%eqn_of_state, EOSdom, scale=-g_R0 )
+      else
+        ! These should perhaps be combined into a single call to calculate the thermal expansion
+        ! and haline contraction coefficients?
+        !   calculate_specific_vol_derivs has only a 1-d implementation, and the 3-d form of
+        ! calculate_density uses whole-array assignments that are not safe under
+        ! -gpu=mem:separate, so this branch runs on the host.  It is not reached by any
+        ! configuration that is currently run on the device, so the round trip costs nothing
+        ! there.  nzc_2d is zero at land points and positive everywhere else, so it doubles as
+        ! the wet mask here and in the two branches below.
+        !$omp target update from(T_int, Sal_int, pressure, nzc_2d)
+        do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
+          if (nzc_2d(ii,jj) > 0) then
+            nzc = nzc_2d(ii,jj)
+            call calculate_specific_vol_derivs(T_int(ii,jj,:), Sal_int(ii,jj,:), pressure(ii,jj,:), &
+                                          dSpV_dT(ii,jj,:), dSpV_dS(ii,jj,:), tv%eqn_of_state, (/2,nzc/) )
+            call calculate_density(T_int(ii,jj,:), Sal_int(ii,jj,:), pressure(ii,jj,:), &
+                                   rho_int(ii,jj,:), tv%eqn_of_state, (/2,nzc/) )
+            do K=2,nzc
+              dbuoy_dT(ii,jj,K) = GV%g_Earth_Z_T2 * (rho_int(ii,jj,K) * dSpV_dT(ii,jj,K))
+              dbuoy_dS(ii,jj,K) = GV%g_Earth_Z_T2 * (rho_int(ii,jj,K) * dSpV_dS(ii,jj,K))
+            enddo
+          endif
+        enddo ; enddo
+        !$omp target update to(dbuoy_dT, dbuoy_dS)
       endif
+    elseif (GV%Boussinesq .or. GV%semi_Boussinesq) then
+      !$omp target update from(nzc_2d)
+      do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
+        if (nzc_2d(ii,jj) > 0) then
+          nzc = nzc_2d(ii,jj)
+          do K=1,nzc+1 ; dbuoy_dT(ii,jj,K) = -g_R0 ; dbuoy_dS(ii,jj,K) = 0.0 ; enddo
+        endif
+      enddo ; enddo
+      !$omp target update to(dbuoy_dT, dbuoy_dS)
+    else
+      !$omp target update from(nzc_2d)
+      do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
+        if (nzc_2d(ii,jj) > 0) then
+          nzc = nzc_2d(ii,jj)
+          do K=1,nzc+1 ; dbuoy_dS(ii,jj,K) = 0.0 ; enddo
+          dbuoy_dT(ii,jj,1) = -GV%g_Earth_Z_T2 / GV%Rlay(1)
+          do K=2,nzc
+            dbuoy_dT(ii,jj,K) = -GV%g_Earth_Z_T2 / (0.5*(GV%Rlay(k-1) + GV%Rlay(k)))
+          enddo
+          dbuoy_dT(ii,jj,nzc+1) = -GV%g_Earth_Z_T2 / GV%Rlay(nzc)
+        endif
+      enddo ; enddo
+      !$omp target update to(dbuoy_dT, dbuoy_dS)
     endif
 
   !---------------------------------------
@@ -1270,6 +1348,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !$omp target exit data map(delete: Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
   !$omp &                 kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
   !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
+  !$omp &                 dSpV_dT, dSpV_dS, rho_int, &
   !$omp &                 c1, kc, kf, nzc_2d)
 
 end subroutine Calc_kappa_shear_vertex
