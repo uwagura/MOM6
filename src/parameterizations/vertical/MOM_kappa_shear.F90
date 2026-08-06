@@ -696,10 +696,14 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
                   merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     h_at_v          ! A mask-weighted thickness interpolated to v-points [H ~> m or kg m-2]
-  real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)) :: &
-    h_vrt               ! h interpolated to vertices [H ~> m or kg m-2].  Unlike the other
-                        ! interpolated fields this is held over the whole domain, because the
-                        ! vertex-to-tracer averaging reads its I-1 and J-1 neighbours.
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
+    h_vrt               ! h interpolated to vertices [H ~> m or kg m-2].  This array is used with
+                        ! two different origins: in the vertex block loop below ii is the vertex
+                        ! I = istart+ii-1, while in the vertex-to-tracer averaging it is shifted
+                        ! back by one to I = itstart+ii-2, so that a block of tracer points can
+                        ! reach its I-1 and J-1 neighbours.  It is only ever read within the
+                        ! block that filled it, so no values have to survive between the two.
   real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
                   merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     dz_vrt, &           ! Vertical distance between interface heights [Z ~> m].
@@ -798,6 +802,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   integer :: iend_read         ! Last I index filled into the block, one beyond iend where there
                                ! is room, to supply the ii+1 that the corner interpolation reads.
   integer :: jend_read         ! Last J index filled into the block, as iend_read but in j.
+  integer :: itstart, itend    ! First and last i indices of the current block of tracer points.
+  integer :: jtstart, jtend    ! First and last j indices of the current block of tracer points.
   integer :: ii, jj            ! Block-local 1-based i and j indices.
 
   ! Diagnostics that should be deleted?
@@ -919,7 +925,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
                         (G%mask2dT(i+1,j) * (h(i+1,j,k) * S_in(i+1,j,k)) + &
                          G%mask2dT(i,j+1) * (h(i,j+1,k) * S_in(i,j+1,k))) ) * I_hwt
         endif
-        h_vrt(I,J,k) = ((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
+        h_vrt(ii,jj,k) = ((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
                      (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) ) / &
                     ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
                      (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
@@ -927,8 +933,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
                       (G%mask2dT(i+1,j) * dz_3d(i+1,j,k) + G%mask2dT(i,j+1) * dz_3d(i,j+1,k)) ) / &
                      ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
                       (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
-!        h_vrt(I,J,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))
-!        h_vrt(I,J,k) = (((h(i,j,k)**2) + (h(i+1,j+1,k)**2)) + &
+!        h_vrt(ii,jj,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))
+!        h_vrt(ii,jj,k) = (((h(i,j,k)**2) + (h(i+1,j+1,k)**2)) + &
 !                     ((h(i+1,j,k)**2) + (h(i,j+1,k)**2))) * I_hwt
     enddo
 
@@ -968,25 +974,25 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
             T0xdz(ii,jj,k) = 0.0 ; S0xdz(ii,jj,k) = 0.0
 
             ! Add a new layer if this one has mass.
-  !          if ((h_lay(ii,jj,nzc) > 0.0) .and. (h_vrt(I,J,k) > dz_massless)) nzc = nzc+1
+  !          if ((h_lay(ii,jj,nzc) > 0.0) .and. (h_vrt(ii,jj,k) > dz_massless)) nzc = nzc+1
             if ((k>CS%nkml) .and. (h_lay(ii,jj,nzc) > 0.0) .and. &
-                (h_vrt(I,J,k) > dz_massless)) nzc = nzc+1
+                (h_vrt(ii,jj,k) > dz_massless)) nzc = nzc+1
 
             ! Only merge clusters of massless layers.
   !         if ((h_lay(ii,jj,nzc) > dz_massless) .or. &
-  !             ((h_lay(ii,jj,nzc) > 0.0) .and. (h_vrt(I,J,k) > dz_massless))) nzc = nzc+1
+  !             ((h_lay(ii,jj,nzc) > 0.0) .and. (h_vrt(ii,jj,k) > dz_massless))) nzc = nzc+1
 
             kc(ii,jj,k) = nzc
-            h_lay(ii,jj,nzc) = h_lay(ii,jj,nzc) + h_vrt(I,J,k)
+            h_lay(ii,jj,nzc) = h_lay(ii,jj,nzc) + h_vrt(ii,jj,k)
             dz_lay(ii,jj,nzc) = dz_lay(ii,jj,nzc) + dz_vrt(ii,jj,k)
-            u0xdz(ii,jj,nzc) = u0xdz(ii,jj,nzc) + u_vrt(ii,jj,k)*h_vrt(I,J,k)
-            v0xdz(ii,jj,nzc) = v0xdz(ii,jj,nzc) + v_vrt(ii,jj,k)*h_vrt(I,J,k)
+            u0xdz(ii,jj,nzc) = u0xdz(ii,jj,nzc) + u_vrt(ii,jj,k)*h_vrt(ii,jj,k)
+            v0xdz(ii,jj,nzc) = v0xdz(ii,jj,nzc) + v_vrt(ii,jj,k)*h_vrt(ii,jj,k)
             if (use_temperature) then
-              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + T_vrt(ii,jj,k)*h_vrt(I,J,k)
-              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + S_vrt(ii,jj,k)*h_vrt(I,J,k)
+              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + T_vrt(ii,jj,k)*h_vrt(ii,jj,k)
+              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + S_vrt(ii,jj,k)*h_vrt(ii,jj,k)
             else
-              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + rho_vrt(ii,jj,k)*h_vrt(I,J,k)
-              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + rho_vrt(ii,jj,k)*h_vrt(I,J,k)
+              T0xdz(ii,jj,nzc) = T0xdz(ii,jj,nzc) + rho_vrt(ii,jj,k)*h_vrt(ii,jj,k)
+              S0xdz(ii,jj,nzc) = S0xdz(ii,jj,nzc) + rho_vrt(ii,jj,k)*h_vrt(ii,jj,k)
             endif
           enddo
           kc(ii,jj,nz+1) = nzc+1
@@ -998,18 +1004,18 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
           !   Now determine kf, the fractional weight of interface kc when
           ! interpolating between interfaces kc and kc+1.
-          kf(ii,jj,1) = 0.0 ; dz_in_lay = h_vrt(I,J,1)
+          kf(ii,jj,1) = 0.0 ; dz_in_lay = h_vrt(ii,jj,1)
           do k=2,nz
             if (kc(ii,jj,k) > kc(ii,jj,k-1)) then
-              kf(ii,jj,k) = 0.0 ; dz_in_lay = h_vrt(I,J,k)
+              kf(ii,jj,k) = 0.0 ; dz_in_lay = h_vrt(ii,jj,k)
             else
-              kf(ii,jj,k) = dz_in_lay*Idz(ii,jj,kc(ii,jj,k)) ; dz_in_lay = dz_in_lay + h_vrt(I,J,k)
+              kf(ii,jj,k) = dz_in_lay*Idz(ii,jj,kc(ii,jj,k)) ; dz_in_lay = dz_in_lay + h_vrt(ii,jj,k)
             endif
           enddo
           kf(ii,jj,nz+1) = 0.0
         else
           do concurrent( k=1:nz )
-            h_lay(ii,jj,k) = h_vrt(I,J,k)
+            h_lay(ii,jj,k) = h_vrt(ii,jj,k)
             dz_lay(ii,jj,k) = dz_vrt(ii,jj,k)
             u0xdz(ii,jj,k) = u_vrt(ii,jj,k)*h_lay(ii,jj,k) ; v0xdz(ii,jj,k) = v_vrt(ii,jj,k)*h_lay(ii,jj,k)
           enddo
@@ -1276,43 +1282,70 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     kappa_io(i,j,1) = 0.0
     kappa_io(i,j,nz+1) = 0.0
   enddo
-  if (CS%VS_ThicknessMean .and. CS%VS_GeometricMean) then
+  if (CS%VS_ThicknessMean) then
     ! This conversion factor is required to allow for arbitrary fractional powers of the diffusivities.
     mks_to_HZ_T = 1.0 /  GV%HZ_T_to_MKS
-    do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec ) DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot))
-      h_SW = 0.5 * (h_vrt(I-1,J-1,k) + h_vrt(I-1,J-1,k-1))
-      h_NE = 0.5 * (h_vrt(I,J,k) + h_vrt(I,J,k-1))
-      h_NW = 0.5 * (h_vrt(I-1,J,k) + h_vrt(I-1,J,k-1))
-      h_SE = 0.5 * (h_vrt(I,J-1,k) + h_vrt(I,J-1,k-1))
-      if ((h_SW + h_NE) + (h_NW + h_SE) > 0.0) then
-        !  The geometric mean is zero if any component is zero, hence the need to use a floor
-        !  on the value of kappa_trunc in regions on boundaries of shear zones.
-        I_htot = 1.0 / ((h_SW + h_NE) + (h_NW + h_SE))
-        kappa_io(i,j,K) = G%mask2dT(i,j) * mks_to_HZ_T * &
+
+    !   The thickness weights are the only thing here that needs h_vrt, and h_vrt is blocked, so
+    ! the values written by the vertex block loop above are gone by now.  Rather than keep a
+    ! domain-sized copy of it, the interpolation is repeated a block of tracer points at a time.
+    ! A tracer point reads the vertices at I-1 and I, so a block fills one more column and row
+    ! than it writes and ii=1 is the vertex at itstart-1, one to the left of the block.
+    ! Consecutive blocks stride by delta_i and delta_j and share that overlapping edge, exactly as
+    ! in the vertex loop above, but with the overlap at the near end rather than the far one.
+    do jtstart=G%jsc,G%jec,delta_j ; do itstart=G%isc,G%iec,delta_i
+      itend = min(itstart + delta_i - 1, G%iec)
+      jtend = min(jtstart + delta_j - 1, G%jec)
+
+      do concurrent( k=1:nz, jj=1:jtend-jtstart+2, ii=1:itend-itstart+2 ) DO_LOCALITY(local(I, J))
+        I = itstart + ii - 2 ; J = jtstart + jj - 2
+        h_vrt(ii,jj,k) = ((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
+                     (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) ) / &
+                    ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
+                     (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
+      enddo
+
+      if (CS%VS_GeometricMean) then
+        do concurrent( K=2:nz, jj=1:jtend-jtstart+1, ii=1:itend-itstart+1 ) &
+                     DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot, I, J))
+          I = itstart + ii - 1 ; J = jtstart + jj - 1
+          h_SW = 0.5 * (h_vrt(ii,jj,k) + h_vrt(ii,jj,k-1))
+          h_NE = 0.5 * (h_vrt(ii+1,jj+1,k) + h_vrt(ii+1,jj+1,k-1))
+          h_NW = 0.5 * (h_vrt(ii,jj+1,k) + h_vrt(ii,jj+1,k-1))
+          h_SE = 0.5 * (h_vrt(ii+1,jj,k) + h_vrt(ii+1,jj,k-1))
+          if ((h_SW + h_NE) + (h_NW + h_SE) > 0.0) then
+            !  The geometric mean is zero if any component is zero, hence the need to use a floor
+            !  on the value of kappa_trunc in regions on boundaries of shear zones.
+            I_htot = 1.0 / ((h_SW + h_NE) + (h_NW + h_SE))
+            kappa_io(i,j,K) = G%mask2dT(i,j) * mks_to_HZ_T * &
                             ( ((GV%HZ_T_to_MKS * max(kappa_vertex(I-1,J-1,K), CS%VS_GeoMean_Kdmin))**(h_SW*I_htot) * &
                                (GV%HZ_T_to_MKS * max(kappa_vertex(I,J,K), CS%VS_GeoMean_Kdmin))**(h_NE*I_htot)) * &
                               ((GV%HZ_T_to_MKS * max(kappa_vertex(I-1,J,K), CS%VS_GeoMean_Kdmin))**(h_NW*I_htot) * &
                                (GV%HZ_T_to_MKS * max(kappa_vertex(I,J-1,K), CS%VS_GeoMean_Kdmin))**(h_SE*I_htot)) )
-      else
-        ! If all points have zero thickness, the thickness-weighted geometric mean is undefined, so use
-        ! the non-thickness weighted geometric mean instead.
-        kappa_io(i,j,K) = G%mask2dT(i,j) * sqrt(sqrt( &
+          else
+            ! If all points have zero thickness, the thickness-weighted geometric mean is undefined, so use
+            ! the non-thickness weighted geometric mean instead.
+            kappa_io(i,j,K) = G%mask2dT(i,j) * sqrt(sqrt( &
               (max(kappa_vertex(I-1,J-1,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J,K),CS%VS_GeoMean_Kdmin)) * &
               (max(kappa_vertex(I-1,J,K),CS%VS_GeoMean_Kdmin) * max(kappa_vertex(I,J-1,K),CS%VS_GeoMean_Kdmin)) ))
-      endif
-    enddo
-  elseif (CS%VS_ThicknessMean) then   ! Use thickness-weighted arithmetic mean diffusivities.
-    do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec ) DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot))
-      h_SW = 0.5 * (h_vrt(I-1,J-1,k) + h_vrt(I-1,J-1,k-1))
-      h_NE = 0.5 * (h_vrt(I,J,k) + h_vrt(I,J,k-1))
-      h_NW = 0.5 * (h_vrt(I-1,J,k) + h_vrt(I-1,J,k-1))
-      h_SE = 0.5 * (h_vrt(I,J-1,k) + h_vrt(I,J-1,k-1))
-      ! The following expression is a thickness weighted arithmetic mean at tracer points:
-      I_htot = 1.0 / (((h_SW + h_NE) + (h_NW + h_SE)) + GV%H_subroundoff)
-      kappa_io(i,j,K) = G%mask2dT(i,j) * &
+          endif
+        enddo
+      else   ! Use thickness-weighted arithmetic mean diffusivities.
+        do concurrent( K=2:nz, jj=1:jtend-jtstart+1, ii=1:itend-itstart+1 ) &
+                     DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot, I, J))
+          I = itstart + ii - 1 ; J = jtstart + jj - 1
+          h_SW = 0.5 * (h_vrt(ii,jj,k) + h_vrt(ii,jj,k-1))
+          h_NE = 0.5 * (h_vrt(ii+1,jj+1,k) + h_vrt(ii+1,jj+1,k-1))
+          h_NW = 0.5 * (h_vrt(ii,jj+1,k) + h_vrt(ii,jj+1,k-1))
+          h_SE = 0.5 * (h_vrt(ii+1,jj,k) + h_vrt(ii+1,jj,k-1))
+          ! The following expression is a thickness weighted arithmetic mean at tracer points:
+          I_htot = 1.0 / (((h_SW + h_NE) + (h_NW + h_SE)) + GV%H_subroundoff)
+          kappa_io(i,j,K) = G%mask2dT(i,j) * &
             (((kappa_vertex(I-1,J-1,K)*h_SW) + (kappa_vertex(I,J,K)*h_NE)) + &
              ((kappa_vertex(I-1,J,K)*h_NW) + (kappa_vertex(I,J-1,K)*h_SE))) * I_htot
-    enddo
+        enddo
+      endif
+    enddo ; enddo ! end of the i- and j-block loops
   elseif (CS%VS_GeometricMean) then   ! The geometic mean diffusivities are not thickness weighted.
     do concurrent( K=2:nz, j=G%jsc:G%jec, i=G%isc:G%iec )
       kappa_io(i,j,K) = G%mask2dT(i,j) * sqrt(sqrt( &
