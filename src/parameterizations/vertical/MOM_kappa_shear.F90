@@ -1846,7 +1846,8 @@ pure subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I
                                               !! boundaries [H-1 Z-1 ~> m-2 or m kg-1].
   real, dimension(nz),   intent(in)    :: Idz !< The inverse grid spacing of layers [Z-1 ~> m-1].
   real,                  intent(in)    :: f2  !< The squared Coriolis parameter [T-2 ~> s-2].
-  type(Kappa_shear_CS),  pointer       :: CS  !< A pointer to this module's control structure.
+  type(Kappa_shear_CS),  intent(in)    :: CS  !< This module's control structure.  Not a pointer:
+                                              !! see the note in kappa_shear_column.
   type(verticalGrid_type), intent(in)  :: GV  !< The ocean's vertical grid structure.
   type(unit_scale_type), intent(in)    :: US  !< A dimensional unit scaling type
   real, dimension(nz+1), intent(inout) :: K_Q !< The shear-driven diapycnal diffusivity divided by
