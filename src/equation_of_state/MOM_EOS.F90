@@ -10,8 +10,6 @@ use MOM_EOS_linear, only : linear_EOS, avg_spec_vol_linear
 use MOM_EOS_linear, only : int_density_dz_linear, int_spec_vol_dp_linear
 use MOM_EOS_Wright, only : buggy_Wright_EOS, avg_spec_vol_buggy_Wright
 use MOM_EOS_Wright, only : int_density_dz_wright, int_spec_vol_dp_wright
-! UMW: Added this to get density_derivs_working_on_device
-use MOM_EOS_Wright, only : calculate_density_derivs_elem_buggy_Wright
 use MOM_EOS_Wright_full, only : Wright_full_EOS, avg_spec_vol_Wright_full
 use MOM_EOS_Wright_full, only : int_density_dz_wright_full, int_spec_vol_dp_wright_full
 use MOM_EOS_Wright_red,  only : Wright_red_EOS, avg_spec_vol_Wright_red

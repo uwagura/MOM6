@@ -285,10 +285,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !---------------------------------------
   ! Work on each column.
   !---------------------------------------
-  ! Variable transfer notes: U_in/v_in are u/v at points - only used a few times
-  ! diabatic driver( which it is local to), so eventually it may be possible to keep in on device
-  ! * h is pull down from device before call to diabatic in step_MOM_thermo
-  ! * tv and its constitutents need to pushed and pull whenever they are used for now
 
   ! Unused diagnostics to allocated to avoid large transfers to and from the device. 
   !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
@@ -302,13 +298,9 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
   !$omp &                            dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, &
   !$omp &                            pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
 
-  ! Calculate thicknesses outside of main kernel
   ! Convert layer thicknesses into geometric thickness in height units.
   call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload = .true. ) 
 
-  !   Everything from the massless-layer merge through the write-back is a per-column
-  ! calculation, so it is done a block at a time.  On the GPU the block is the whole domain and
-  ! this nest runs once; on the CPU it is a single column.
   do jstart=js,je,njblock ; do istart=is,ie,niblock
     iend = min(istart + niblock - 1, ie)
     jend = min(jstart + njblock - 1, je)
@@ -469,11 +461,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       else
         ! These should perhaps be combined into a single call to calculate the thermal expansion
         ! and haline contraction coefficients?
-        !   calculate_specific_vol_derivs has only a 1-d implementation, and the 3-d form of
-        ! calculate_density uses whole-array assignments that are not safe under
-        ! -gpu=mem:separate, so this branch runs on the host.  It is not reached by any
-        ! configuration that is currently run on the device, so the round trip costs nothing
-        ! there.
         !$omp target update from(T_int, Sal_int, pressure, nzc_2d)
         do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
           if (G%mask2dT(istart+ii-1, jstart+jj-1) > 0.0) then
@@ -621,10 +608,9 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     call hchksum(tke_io, "tke", G%HI, unscale=US%Z_to_m**2*US%s_to_T**2)
   endif
 
-  !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
-  !$omp &                 kf, kc, kappa, Idz)
-  !$omp target exit data map(delete: tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean)
-  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
+  !$omp target exit data map(delete: h_lay, dz_3d, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, kf, kc, kappa, Idz, &
+  !$omp &                            tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+  !$omp &                            diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
   !$omp &                            dbuoy_dT, dbuoy_dS, dSpV_dT, dSpV_dS, rho_int, T_int, Sal_int, & 
   !$omp &                            pressure, I_dz_int, u, v, T, Sal, a1, c1, nzc_2d )
 
@@ -709,13 +695,6 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     dz_vrt, &           ! Vertical distance between interface heights [Z ~> m].
     u_vrt, v_vrt, &     ! u_in and v_in interpolated to vertices [L T-1 ~> m s-1].
     T_vrt, S_vrt, rho_vrt ! T [C ~> degC], S [S ~> ppt], and rho [R ~> kg m-3] at vertices.
-  !   All of the per-column scratch below is held in blocked 3-d arrays, so that each column in a
-  ! block is an independent (ii,jj) task with no per-thread private arrays.  A 0 setting of
-  ! CS%niblock or CS%njblock means the full computational domain, which is the GPU default and
-  ! makes this one block; the CPU default of 1 reduces these to single columns.  The sentinel is
-  ! resolved here rather than in kappa_shear_init so that CS is never modified.  These are the
-  ! arrays that are handed to kappa_shear_column, which takes their bounds as arguments rather
-  ! than assuming a staggering.
   real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
                   merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
     Idz, &      ! The inverse of the thickness of the merged layers [H-1 ~> m2 kg-1].
@@ -810,8 +789,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   isB = G%isc-1 ; ieB = G%iecB ; jsB = G%jsc-1 ; jeB = G%jecB ; nz = GV%ke
 
   !   Consecutive blocks overlap by one column and row, so only niblock-1 by njblock-1
-  ! vertices are written per block.  The 0 sentinel therefore resolves to one more than
-  ! the domain extent, so that "the full domain" really is a single block.
+  ! vertices are written per block.
   niblock = merge(IeB-IsB+2, CS%niblock, CS%niblock==0)
   njblock = merge(JeB-JsB+2, CS%njblock, CS%njblock==0)
   delta_i = niblock - 1 ; delta_j = njblock - 1
@@ -829,15 +807,13 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !   Everything below is computed on the device, so the locals are only allocated there and
   ! never copied in.  The caller (MOM_set_diffusivity) owns kappa_io, tke_io and kv_io and maps
   ! those itself.
-  !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
-  !$omp target enter data map(alloc: dz_3d, h_at_u, h_at_v, kappa_vertex, &
-  !$omp &                 h_vrt, dz_vrt, u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, &
-  !$omp &                 kappa_full, tke_full)
-  !$omp target enter data map(alloc: Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
-  !$omp &                 kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-  !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
-  !$omp &                 dSpV_dT, dSpV_dS, rho_int, &
-  !$omp &                 c1, kc, kf, nzc_2d)
+  !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
+  !$omp &                            dz_3d, h_at_u, h_at_v, kappa_vertex, h_vrt, dz_vrt, &
+  !$omp &                            u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, kappa_full, tke_full, &
+  !$omp &                            Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
+  !$omp &                            kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+  !$omp &                            I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
+  !$omp &                            dSpV_dT, dSpV_dS, rho_int, c1, kc, kf, nzc_2d)
 
   if (CS%debug .or. CS%id_N2_init>0) then
     do concurrent( K=1:nz+1, J=G%JsdB:G%JedB, I=G%IsdB:G%IedB )
@@ -866,12 +842,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   ! Convert layer thicknesses into geometric thickness in height units.
   call thickness_to_dz(h, tv, dz_3d, G, GV, US, halo_size=1, do_offload=.true.)
 
-  !   Everything from the thickness interpolation through the write-back is a per-column
-  ! calculation, so it is done a block at a time.  The blocks stride by delta_i and delta_j rather
-  ! than by the block size, because the corner interpolation reads the ii+1 and jj+1 neighbours of
-  ! h_at_v and h_at_u; each block therefore fills one more column and row than it writes, and
-  ! consecutive blocks recompute that shared edge.  iend and jend bound what is written,
-  ! iend_read and jend_read what is filled.
+  ! The blocks stride by delta_i and delta_j rather than by the block size, because 
+  ! the corner interpolation reads the ii+1 and jj+1 neighbours of h_at_v and h_at_u;
   do jstart=JsB,JeB,delta_j ; do istart=IsB,IeB,delta_i
     iend = min(istart + delta_i - 1, IeB)
     jend = min(jstart + delta_j - 1, JeB)
@@ -945,18 +917,12 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     endif
 
 !---------------------------------------
-! Set up each column: merge massless layers, apply a timestep of background diffusion, and
-! assemble the interface temperatures, salinities and pressures that the equation of state needs.
+! Work on each column.
 !---------------------------------------
-
     do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) &
         DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1, k, I, J))
       I = istart + ii - 1 ; J = jstart + jj - 1
 
-      !   The equation of state is evaluated over the whole (I,J,K) rectangle below, including land
-      ! points and interfaces deeper than nzc, so zero its inputs everywhere first rather than
-      ! letting it read whatever the uninitialized memory holds.  Only K=1:nzc are set below, and
-      ! only the results at K=2:nzc of wet columns are ever read.
       do concurrent( K=1:nz+1 )
         pressure(ii,jj,K) = 0.0 ; T_int(ii,jj,K) = 0.0 ; Sal_int(ii,jj,K) = 0.0
       enddo
@@ -1116,8 +1082,6 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     ! Calculate the thermodynamic coefficients for all of the vertex columns at once.
     if (use_temperature) then
       if (GV%Boussinesq .or. GV%semi_Boussinesq) then
-        !   calculate_density_derivs takes assumed-shape arguments, so its domain is expressed in
-        ! 1-based indices, which the block-local arrays already are.
         EOSdom(1,1) = 1 ; EOSdom(1,2) = iend - istart + 1
         EOSdom(2,1) = 1 ; EOSdom(2,2) = jend - jstart + 1
         EOSdom(3,1) = 2 ; EOSdom(3,2) = nz
@@ -1126,12 +1090,6 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       else
         ! These should perhaps be combined into a single call to calculate the thermal expansion
         ! and haline contraction coefficients?
-        !   calculate_specific_vol_derivs has only a 1-d implementation, and the 3-d form of
-        ! calculate_density uses whole-array assignments that are not safe under
-        ! -gpu=mem:separate, so this branch runs on the host.  It is not reached by any
-        ! configuration that is currently run on the device, so the round trip costs nothing
-        ! there.  nzc_2d is zero at land points and positive everywhere else, so it doubles as
-        ! the wet mask here and in the two branches below.
         !$omp target update from(T_int, Sal_int, pressure, nzc_2d)
         do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
           if (nzc_2d(ii,jj) > 0) then
@@ -1400,15 +1358,13 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     call post_data(CS%id_S2_mean, diag_S2_mean, CS%diag)
   endif
 
-  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean)
-  !$omp target exit data map(delete: dz_3d, h_at_u, h_at_v, kappa_vertex, &
-  !$omp &                 h_vrt, dz_vrt, u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, &
-  !$omp &                 kappa_full, tke_full)
-  !$omp target exit data map(delete: Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
-  !$omp &                 kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
-  !$omp &                 I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
-  !$omp &                 dSpV_dT, dSpV_dS, rho_int, &
-  !$omp &                 c1, kc, kf, nzc_2d)
+  !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
+  !$omp &                            dz_3d, h_at_u, h_at_v, kappa_vertex, h_vrt, dz_vrt, &
+  !$omp &                            u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, kappa_full, tke_full, &
+  !$omp &                            Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
+  !$omp &                            kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
+  !$omp &                            I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
+  !$omp &                            dSpV_dT, dSpV_dS, rho_int, c1, kc, kf, nzc_2d)
 
 end subroutine Calc_kappa_shear_vertex
 
@@ -1419,12 +1375,6 @@ pure subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, 
                               N2_mean, S2_mean, CS, GV, US, id_lo, id_hi, jd_lo, jd_hi, i, j )
   !$omp declare target
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure.
-  !   The horizontal bounds of the caller's arrays are passed in rather than being taken from
-  ! SZI_(G)/SZJ_(G), so that this routine can serve both the tracer-point driver (which passes
-  ! isd/ied/jsd/jed) and the vertex driver (which passes IsdB/IedB/JsdB/JedB) without either one
-  ! having to declare its arrays at the other's staggering.  In symmetric memory IsdB = isd-1, so
-  ! a B-grid array passed to an SZI_/SZJ_ dummy would be silently misaligned by sequence
-  ! association.  This routine never refers to the grid other than through these bounds.
   integer,           intent(in)    :: id_lo !< The lower i-bound of the caller's horizontal arrays.
   integer,           intent(in)    :: id_hi !< The upper i-bound of the caller's horizontal arrays.
   integer,           intent(in)    :: jd_lo !< The lower j-bound of the caller's horizontal arrays.
@@ -2140,8 +2090,8 @@ pure subroutine find_kappa_tke(N2, S2, kappa_in, Idz, h_Int, dz_Int, dz_h_Int, I
   real, parameter :: roundoff = 1.0e-16 ! A negligible fractional change in TKE [nondim].
                         ! This could be larger but performance gains are small.
 
-  logical :: tke_noflux_bottom_BC = .false. ! Specify the boundary conditions
-  logical :: tke_noflux_top_BC = .false.    ! that are applied to the TKE equations.
+  logical, parameter :: tke_noflux_bottom_BC = .false. ! Specify the boundary conditions
+  logical, parameter :: tke_noflux_top_BC = .false.    ! that are applied to the TKE equations.
   logical :: do_Newton    ! If .true., use Newton's method for the next iteration.
   logical :: abort_Newton ! If .true., an Newton's method has encountered a 0
                           ! pivot, and should not have been used.
