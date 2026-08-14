@@ -879,7 +879,7 @@ end subroutine dz_to_thickness_simple
 !> Converts layer thicknesses in thickness units to the vertical distance between edges in height
 !! units, perhaps by multiplication by the precomputed layer-mean specific volume stored in an
 !! array in the thermo_var_ptrs type when in non-Boussinesq mode.
-subroutine thickness_to_dz_3d(h, tv, dz, G, GV, US, halo_size, do_offload)
+subroutine thickness_to_dz_3d(h, tv, dz, G, GV, US, halo_size, do_offload, i_lo, i_hi, j_lo, j_hi)
   type(ocean_grid_type),   intent(in)    :: G  !< The ocean's grid structure
   type(verticalGrid_type), intent(in)    :: GV !< The ocean's vertical grid structure
   type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
@@ -895,6 +895,15 @@ subroutine thickness_to_dz_3d(h, tv, dz, G, GV, US, halo_size, do_offload)
                                                !! calculate thicknesses
   logical,       optional, intent(in)    :: do_offload !< If .true., only uses data calculates dz
                                                !! on GPU (default .false.)
+  integer,       optional, intent(in)    :: i_lo !< The lower i-bound to work over, overriding
+                                               !! G%isc-halo.  Callers that consume dz one tile at
+                                               !! a time can use these to compute each tile just
+                                               !! before they read it, which keeps the part of dz
+                                               !! in play small enough to stay in cache instead of
+                                               !! materializing the whole field in a separate pass.
+  integer,       optional, intent(in)    :: i_hi !< The upper i-bound to work over.
+  integer,       optional, intent(in)    :: j_lo !< The lower j-bound to work over.
+  integer,       optional, intent(in)    :: j_hi !< The upper j-bound to work over.
   ! Local variables
   character(len=128) :: mesg    ! A string for error messages
   integer :: i, j, k, is, ie, js, je, halo, nz
@@ -906,6 +915,8 @@ subroutine thickness_to_dz_3d(h, tv, dz, G, GV, US, halo_size, do_offload)
 
   halo = 0 ; if (present(halo_size)) halo = max(0,halo_size)
   is = G%isc-halo ; ie = G%iec+halo ; js = G%jsc-halo ; je = G%jec+halo ; nz = GV%ke
+  if (present(i_lo)) is = i_lo ; if (present(i_hi)) ie = i_hi
+  if (present(j_lo)) js = j_lo ; if (present(j_hi)) je = j_hi
 
   if ((.not.GV%Boussinesq) .and. allocated(tv%SpV_avg))  then
     if ((allocated(tv%SpV_avg)) .and. (tv%valid_SpV_halo < halo)) then
