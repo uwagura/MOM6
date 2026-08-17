@@ -318,6 +318,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     ! from entering call. Keeping this out of the per-column k-loop so it vectorizes on the CPU
     do concurrent( k=1:nz+1, jj=1:jend-jstart+1, ii=1:iend-istart+1 )
       T_int(ii,jj,k) = 0.0 ; Sal_int(ii,jj,k) = 0.0 ; pressure(ii,jj,k) = 0.0
+      kappa(ii,jj,K) = CS%kappa_seed
     enddo
 
     nzc_max = 0
@@ -524,14 +525,6 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       f2 = 0.25 * ((G%Coriolis2Bu(I,J) + G%Coriolis2Bu(I-1,J-1)) + &
                     (G%Coriolis2Bu(I,J-1) + G%Coriolis2Bu(I-1,J)))
 
-      ! ----------------------------------------------------    I_Ld2_1d, dz_Int_1d
-
-      ! Set the initial guess for kappa, here defined at interfaces.
-      ! ----------------------------------------------------
-      do concurrent( K=1:nzc_2d(ii,jj)+1 )
-        kappa(ii,jj,K) = CS%kappa_seed
-      enddo
-
       call kappa_shear_column(kappa, tke, dt, nzc_2d(ii,jj), f2, dbuoy_dT, dbuoy_dS, &
                              h_lay, dz_lay, I_dz_int, kappa_avg, u, v, T, Sal, &
                              tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
@@ -540,7 +533,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       ! call cpu_clock_begin(id_clock_setup)
       ! Extrapolate from the vertically reduced grid back to the original layers.
       if (nz == nzc_2d(ii,jj)) then
-        do concurrent( K=1:nz+1 )
+        do K=1,nz+1
           kappa_full(ii,jj,K) = kappa_avg(ii,jj,K)
           if (CS%all_layer_TKE_bug) then
             tke_full(ii,jj,K) = tke(ii,jj,K)
@@ -548,21 +541,21 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
             tke_full(ii,jj,K) = tke_avg(ii,jj,K)
           endif
         enddo
-        if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
+        if (CS%id_N2_mean>0) then ; do K=1,nz+1
           diag_N2_mean(i,j,K) = N2_mean(ii,jj,K)
         enddo ; endif
-        if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
+        if (CS%id_S2_mean>0) then ; do K=1,nz+1
           diag_S2_mean(i,j,K) = S2_mean(ii,jj,K)
         enddo ; endif
-        if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+        if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
           diag_N2_init(i,j,K) = N2_init(ii,jj,K)
         enddo ; endif
-        if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+        if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
           diag_S2_init(i,j,K) = S2_init(ii,jj,K)
         enddo ; endif
       else
         ! Could these do loops be combined?
-        do concurrent( K=1:nz+1 )
+        do K=1,nz+1
           if (kf(ii,jj,K) == 0.0) then
             kappa_full(ii,jj,K) = kappa_avg(ii,jj,kc(ii,jj,K))
             tke_full(ii,jj,K) = tke_avg(ii,jj,kc(ii,jj,K))
@@ -573,7 +566,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
                                 * tke_avg(ii,jj,kc(ii,jj,K)+1)
           endif
         enddo
-        do concurrent( K=1:nz+1 )
+        do K=1,nz+1
           if (kf(ii,jj,K) == 0.0) then
             if (CS%id_N2_mean>0) diag_N2_mean(i,j,K) = N2_mean(ii,jj,kc(ii,jj,K))
             if (CS%id_S2_mean>0) diag_S2_mean(i,j,K) = S2_mean(ii,jj,kc(ii,jj,K))
@@ -598,19 +591,19 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
       ! call cpu_clock_end(id_clock_setup)
     else  ! Land points, still inside the i,j-loop.
-      do concurrent( K=1:nz+1 )
+      do K=1,nz+1
         kappa_full(ii,jj,K) = 0.0 ; tke_full(ii,jj,K) = 0.0
       enddo
-      if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
+      if (CS%id_N2_mean>0) then ; do K=1,nz+1
         diag_N2_mean(i,j,K) = 0.0
       enddo ; endif
-      if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
+      if (CS%id_S2_mean>0) then ; do K=1,nz+1
         diag_S2_mean(i,j,K) = 0.0
       enddo ; endif
-      if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+      if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
         diag_N2_init(i,j,K) = 0.0
       enddo ; endif
-      if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+      if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
         diag_S2_init(i,j,K) = 0.0
       enddo ; endif
     endif ; enddo ! end of j-loop, ! end of i-loop, !end of if (G%mask2dT(i,j) > 0.0)
@@ -730,9 +723,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     u0xdz, &    ! The initial zonal velocity times dz [L H T-1 ~> m2 s-1 or kg m-1 s-1].
     v0xdz, &    ! The initial meridional velocity times dz [H L T-1 ~> m2 s-1 or kg m-1 s-1]
     T0xdz, &    ! The initial temperature times dz [C H ~> degC m or degC kg m-2]
-    S0xdz, &    ! The initial salinity times dz [S H ~> ppt m or ppt kg m-2]
-    a1          ! a1 is the coupling between adjacent interfaces in the TKE,
-                ! velocity, and density equations [H ~> m or kg m-2]
+    S0xdz       ! The initial salinity times dz [S H ~> ppt m or ppt kg m-2]
   real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
                   merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)+1) :: &
     kappa, &    ! The shear-driven diapycnal diffusivity at an interface [H Z T-1 ~> m2 s-1 or Pa s]
@@ -756,9 +747,18 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     dSpV_dT, &  ! The partial derivative of specific volume with changes in temperature [R-1 C-1 ~> m3 kg-1 degC-1]
     dSpV_dS, &  ! The partial derivative of specific volume with changes in salinity [R-1 S-1 ~> m3 kg-1 ppt-1]
     rho_int, &  ! The in situ density interpolated to an interface [R ~> kg m-3]
-    c1, &       ! c1 is used in the tridiagonal (and similar) solvers [nondim].
     kappa_full, & ! kappa mapped back to the original interfaces [H Z T-1 ~> m2 s-1 or Pa s]
     tke_full    ! tke mapped back to the original interfaces [Z2 T-2 ~> m2 s-2].
+
+  !   a1 and c1 are the coupling and upward-influence coefficients of the background
+  ! diffusion tridiagonal solve.  They are written and read entirely within a single
+  ! iteration of the column loop below, so they are given to that loop as local
+  ! variables rather than kept in blocked arrays: that keeps them contiguous per column
+  ! instead of striding by niblock*njblock, and keeps two arrays off the device.
+  real, dimension(SZK_(GV)+1) :: &
+    a1_col, &   ! a1 is the coupling between adjacent interfaces in the TKE,
+                ! velocity, and density equations [H ~> m or kg m-2]
+    c1_col      ! c1 is used in the tridiagonal (and similar) solvers [nondim].
 
   real :: f2    ! The squared Coriolis parameter of each column [T-2 ~> s-2].
   real :: surface_pres  ! The top surface pressure [R L2 T-2 ~> Pa].
@@ -836,19 +836,16 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !$omp target enter data map(alloc: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
   !$omp &                            dz_3d, h_at_u, h_at_v, kappa_vertex, h_vrt, dz_vrt, &
   !$omp &                            u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, kappa_full, tke_full, &
-  !$omp &                            Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
+  !$omp &                            Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                            kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
   !$omp &                            I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
-  !$omp &                            dSpV_dT, dSpV_dS, rho_int, c1, kc, kf, nzc_2d)
+  !$omp &                            dSpV_dT, dSpV_dS, rho_int, a1_col, c1_col, kc, kf, nzc_2d)
 
   if ((CS%id_N2_init>0) .or. CS%debug) diag_N2_init(:,:,:) = 0.0
   if ((CS%id_S2_init>0) .or. CS%debug) diag_S2_init(:,:,:) = 0.0
   if (CS%id_N2_mean>0) diag_N2_mean(:,:,:) = 0.0
   if (CS%id_S2_mean>0) diag_S2_mean(:,:,:) = 0.0
   kappa_vertex(:,:,:) = 0.0
-
-  ! Convert layer thicknesses into geometric thickness in height units.
-  call thickness_to_dz(h, tv, dz_3d, G, GV, US, halo_size=1, do_offload=.true.)
 
   ! The blocks stride by delta_i and delta_j rather than by the block size, because
   ! the corner interpolation reads the ii+1 and jj+1 neighbours of h_at_v and h_at_u;
@@ -857,6 +854,13 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     jend = min(jstart + delta_j - 1, JeB)
     iend_read = min(istart + niblock - 1, IeB+1)
     jend_read = min(jstart + njblock - 1, JeB+1)
+
+    ! Convert layer thicknesses into geometric thickness in height units, one tile at a
+    ! time so dz_3d stays cache-resident instead of being materialized over the whole
+    ! domain in a separate pass.  The tile is read up to iend_read/jend_read, one column
+    ! and row beyond iend/jend, to supply the corner interpolation's ii+1/jj+1 neighbours.
+    call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload=.true., &
+                         i_lo=istart, i_hi=iend_read, j_lo=jstart, j_hi=jend_read)
 
     if (CS%vertex_shear_OBC_bug) then
       do concurrent( k=1:nz, jj=1:jend_read-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(I, j))
@@ -927,17 +931,19 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 ! Work on each column.
 !---------------------------------------
     ! Zero out blocked arrays so that the calculate_density_derivs call is defined everywhere it
-    ! evaluates.  Doing this outside of the column loop so so that it vectorizes on CPU
+    ! evaluates, and seed kappa.  Doing this outside of the column loop so that it vectorizes on CPU.
     do concurrent( K=1:nz+1, jj=1:jend-jstart+1, ii=1:iend-istart+1 )
       pressure(ii,jj,K) = 0.0 ; T_int(ii,jj,K) = 0.0 ; Sal_int(ii,jj,K) = 0.0
+      kappa(ii,jj,K) = CS%kappa_seed
     enddo
     do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 )
       nzc_2d(ii,jj) = 0
     enddo
 
-    do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) &
-        DO_LOCALITY(local(nzc, surface_pres, dz_in_lay, b1, d1, bd1, k, I, J)) &
-        DO_LOCALITY(reduce(max:nzc_max))
+    !$omp target teams loop collapse(2) &
+    !$omp & private(nzc, surface_pres, dz_in_lay, b1, d1, bd1, I, J, a1_col, c1_col) &
+    !$omp & reduction(max:nzc_max)
+    do jj=1,jend-jstart+1 ; do ii=1,iend-istart+1
       I = istart + ii - 1 ; J = jstart + jj - 1
 
       if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
@@ -976,7 +982,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
           kc(ii,jj,nz+1) = nzc+1
 
           ! Set up Idz as the inverse of layer thicknesses.
-          do concurrent( k=1:nzc )
+          do k=1,nzc
             Idz(ii,jj,k) = 1.0 / h_lay(ii,jj,k)
           enddo
 
@@ -992,22 +998,22 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
           enddo
           kf(ii,jj,nz+1) = 0.0
         else
-          do concurrent( k=1:nz )
+          do k=1,nz
             h_lay(ii,jj,k) = h_vrt(ii,jj,k)
             dz_lay(ii,jj,k) = dz_vrt(ii,jj,k)
             u0xdz(ii,jj,k) = u_vrt(ii,jj,k)*h_lay(ii,jj,k) ; v0xdz(ii,jj,k) = v_vrt(ii,jj,k)*h_lay(ii,jj,k)
           enddo
           if (use_temperature) then
-            do concurrent( k=1:nz )
+            do k=1,nz
               T0xdz(ii,jj,k) = T_vrt(ii,jj,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = S_vrt(ii,jj,k)*h_lay(ii,jj,k)
             enddo
           else
-            do concurrent( k=1:nz )
+            do k=1,nz
               T0xdz(ii,jj,k) = rho_vrt(ii,jj,k)*h_lay(ii,jj,k) ; S0xdz(ii,jj,k) = rho_vrt(ii,jj,k)*h_lay(ii,jj,k)
             enddo
           endif
           nzc = nz
-          do concurrent( k=1:nzc+1 )
+          do k=1,nzc+1
             kc(ii,jj,k) = k
             kf(ii,jj,k) = 0.0
           enddo
@@ -1016,7 +1022,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         !   Set up I_dz_int as the inverse of the distance between adjacent layer centers, for
         ! applying the background diffusivity.
         I_dz_int(ii,jj,1) = 2.0 / dz_lay(ii,jj,1)
-        do concurrent( K=2:nzc )
+        do K=2,nzc
           I_dz_int(ii,jj,K) = 2.0 / (dz_lay(ii,jj,K-1) + dz_lay(ii,jj,K))
         enddo
         I_dz_int(ii,jj,nzc+1) = 2.0 / dz_lay(ii,jj,nzc)
@@ -1024,36 +1030,36 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         !   Determine the velocities and thermodynamic tracers after eliminating massless layers
         ! and applying a time-step of background diffusion.
         if (nzc > 1) then
-          a1(ii,jj,2) = k0dt*I_dz_int(ii,jj,2)
-          b1 = 1.0 / (h_lay(ii,jj,1) + a1(ii,jj,2))
+          a1_col(2) = k0dt*I_dz_int(ii,jj,2)
+          b1 = 1.0 / (h_lay(ii,jj,1) + a1_col(2))
           u(ii,jj,1) = b1 * u0xdz(ii,jj,1) ; v(ii,jj,1) = b1 * v0xdz(ii,jj,1)
           T(ii,jj,1) = b1 * T0xdz(ii,jj,1) ; Sal(ii,jj,1) = b1 * S0xdz(ii,jj,1)
-          c1(ii,jj,2) = a1(ii,jj,2) * b1 ; d1 = h_lay(ii,jj,1) * b1 ! = 1 - c1
+          c1_col(2) = a1_col(2) * b1 ; d1 = h_lay(ii,jj,1) * b1 ! = 1 - c1
           do k=2,nzc-1
-            bd1 = h_lay(ii,jj,k) + d1*a1(ii,jj,k)
-            a1(ii,jj,k+1) = k0dt*I_dz_int(ii,jj,k+1)
-            b1 = 1.0 / (bd1 + a1(ii,jj,k+1))
-            u(ii,jj,k) = b1 * (u0xdz(ii,jj,k) + a1(ii,jj,k)*u(ii,jj,k-1))
-            v(ii,jj,k) = b1 * (v0xdz(ii,jj,k) + a1(ii,jj,k)*v(ii,jj,k-1))
-            T(ii,jj,k) = b1 * (T0xdz(ii,jj,k) + a1(ii,jj,k)*T(ii,jj,k-1))
-            Sal(ii,jj,k) = b1 * (S0xdz(ii,jj,k) + a1(ii,jj,k)*Sal(ii,jj,k-1))
-            c1(ii,jj,k+1) = a1(ii,jj,k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
+            bd1 = h_lay(ii,jj,k) + d1*a1_col(k)
+            a1_col(k+1) = k0dt*I_dz_int(ii,jj,k+1)
+            b1 = 1.0 / (bd1 + a1_col(k+1))
+            u(ii,jj,k) = b1 * (u0xdz(ii,jj,k) + a1_col(k)*u(ii,jj,k-1))
+            v(ii,jj,k) = b1 * (v0xdz(ii,jj,k) + a1_col(k)*v(ii,jj,k-1))
+            T(ii,jj,k) = b1 * (T0xdz(ii,jj,k) + a1_col(k)*T(ii,jj,k-1))
+            Sal(ii,jj,k) = b1 * (S0xdz(ii,jj,k) + a1_col(k)*Sal(ii,jj,k-1))
+            c1_col(k+1) = a1_col(k+1) * b1 ; d1 = bd1 * b1 ! d1 = 1 - c1
           enddo
           ! rho or T and S have insulating boundary conditions, u & v use no-slip
           ! bottom boundary conditions (if kappa0 > 0).
           ! For no-slip bottom boundary conditions
-          b1 = 1.0 / ((h_lay(ii,jj,nzc) + d1*a1(ii,jj,nzc)) + k0dt*I_dz_int(ii,jj,nzc+1))
-          u(ii,jj,nzc) = b1 * (u0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*u(ii,jj,nzc-1))
-          v(ii,jj,nzc) = b1 * (v0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*v(ii,jj,nzc-1))
+          b1 = 1.0 / ((h_lay(ii,jj,nzc) + d1*a1_col(nzc)) + k0dt*I_dz_int(ii,jj,nzc+1))
+          u(ii,jj,nzc) = b1 * (u0xdz(ii,jj,nzc) + a1_col(nzc)*u(ii,jj,nzc-1))
+          v(ii,jj,nzc) = b1 * (v0xdz(ii,jj,nzc) + a1_col(nzc)*v(ii,jj,nzc-1))
           ! For insulating boundary conditions
-          b1 = 1.0 / (h_lay(ii,jj,nzc) + d1*a1(ii,jj,nzc))
-          T(ii,jj,nzc) = b1 * (T0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*T(ii,jj,nzc-1))
-          Sal(ii,jj,nzc) = b1 * (S0xdz(ii,jj,nzc) + a1(ii,jj,nzc)*Sal(ii,jj,nzc-1))
+          b1 = 1.0 / (h_lay(ii,jj,nzc) + d1*a1_col(nzc))
+          T(ii,jj,nzc) = b1 * (T0xdz(ii,jj,nzc) + a1_col(nzc)*T(ii,jj,nzc-1))
+          Sal(ii,jj,nzc) = b1 * (S0xdz(ii,jj,nzc) + a1_col(nzc)*Sal(ii,jj,nzc-1))
           do k=nzc-1,1,-1
-            u(ii,jj,k) = u(ii,jj,k) + c1(ii,jj,k+1)*u(ii,jj,k+1)
-            v(ii,jj,k) = v(ii,jj,k) + c1(ii,jj,k+1)*v(ii,jj,k+1)
-            T(ii,jj,k) = T(ii,jj,k) + c1(ii,jj,k+1)*T(ii,jj,k+1)
-            Sal(ii,jj,k) = Sal(ii,jj,k) + c1(ii,jj,k+1)*Sal(ii,jj,k+1)
+            u(ii,jj,k) = u(ii,jj,k) + c1_col(k+1)*u(ii,jj,k+1)
+            v(ii,jj,k) = v(ii,jj,k) + c1_col(k+1)*v(ii,jj,k+1)
+            T(ii,jj,k) = T(ii,jj,k) + c1_col(k+1)*T(ii,jj,k+1)
+            Sal(ii,jj,k) = Sal(ii,jj,k) + c1_col(k+1)*Sal(ii,jj,k+1)
           enddo
         else
           ! This is correct, but probably unnecessary.
@@ -1079,7 +1085,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         endif
         if (use_temperature) then
           pressure(ii,jj,1) = surface_pres
-          do concurrent( k=2:nzc )
+          do k=2,nzc
             pressure(ii,jj,k) = pressure(ii,jj,k-1) + gR0*h_lay(ii,jj,k-1)
             T_int(ii,jj,k) = 0.5*(T(ii,jj,k-1) + T(ii,jj,k))
             Sal_int(ii,jj,k) = 0.5*(Sal(ii,jj,k-1) + Sal(ii,jj,k))
@@ -1090,7 +1096,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
         nzc_2d(ii,jj) = nzc
         nzc_max = max( nzc_max, nzc )
       endif ! end if ((G%mask2dCu(I,j)
-    enddo ! end of the setup I- and J-loops
+    enddo ; enddo ! end of the setup I- and J-loops
 
     ! Calculate the thermodynamic coefficients for all of the vertex columns at once.
     if (use_temperature) then
@@ -1147,17 +1153,12 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !---------------------------------------
   ! Work on each column.
   !---------------------------------------
-    do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(nzc, f2, k, I, J))
+    do concurrent( jj=1:jend-jstart+1, ii=1:iend-istart+1 ) DO_LOCALITY(local(nzc, f2, I, J))
       I = istart + ii - 1 ; J = jstart + jj - 1
       if ((G%mask2dCu(I,j) + G%mask2dCu(I,j+1)) + &
           (G%mask2dCv(i,J) + G%mask2dCv(i+1,J)) > 0.0) then
         nzc = nzc_2d(ii,jj)
         f2 = G%Coriolis2Bu(I,J)
-
-      ! ----------------------------------------------------
-      ! Set the initial guess for kappa, here defined at interfaces.
-      ! ----------------------------------------------------
-        do K=1,nzc+1 ; kappa(ii,jj,K) = CS%kappa_seed ; enddo
 
         call kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, &
                                 h_lay, dz_lay, I_dz_int, kappa_avg, u, v, T, Sal, &
@@ -1166,7 +1167,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
 
       ! Extrapolate from the vertically reduced grid back to the original layers.
         if (nz == nzc) then
-          do concurrent( K=1:nz+1 )
+          do K=1,nz+1
             kappa_full(ii,jj,K) = kappa_avg(ii,jj,K)
             if (CS%all_layer_TKE_bug) then
               tke_full(ii,jj,K) = tke(ii,jj,K)
@@ -1174,20 +1175,20 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
               tke_full(ii,jj,K) = tke_avg(ii,jj,K)
             endif
           enddo
-          if (CS%id_N2_mean>0) then ; do concurrent( K=1:nz+1 )
+          if (CS%id_N2_mean>0) then ; do K=1,nz+1
             diag_N2_mean(I,J,K) = N2_mean(ii,jj,K)
           enddo ; endif
-          if (CS%id_S2_mean>0) then ; do concurrent( K=1:nz+1 )
+          if (CS%id_S2_mean>0) then ; do K=1,nz+1
             diag_S2_mean(I,J,K) = S2_mean(ii,jj,K)
           enddo ; endif
-          if ((CS%id_N2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+          if ((CS%id_N2_init>0) .or. CS%debug) then ; do K=1,nz+1
             diag_N2_init(I,J,K) = N2_init(ii,jj,K)
           enddo ; endif
-          if ((CS%id_S2_init>0) .or. CS%debug) then ; do concurrent( K=1:nz+1 )
+          if ((CS%id_S2_init>0) .or. CS%debug) then ; do K=1,nz+1
             diag_S2_init(I,J,K) = S2_init(ii,jj,K)
           enddo ; endif
         else
-          do concurrent( K=1:nz+1 )
+          do K=1,nz+1
             if (kf(ii,jj,K) == 0.0) then
               kappa_full(ii,jj,K) = kappa_avg(ii,jj,kc(ii,jj,K))
               tke_full(ii,jj,K) = tke_avg(ii,jj,kc(ii,jj,K))
@@ -1198,7 +1199,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
                                 kf(ii,jj,K) * tke_avg(ii,jj,kc(ii,jj,K)+1)
             endif
           enddo
-          do concurrent( K=1:nz+1 )
+          do K=1,nz+1
             if (kf(ii,jj,K) == 0.0) then
               if (CS%id_N2_mean>0) diag_N2_mean(I,J,K) = N2_mean(ii,jj,kc(ii,jj,K))
               if (CS%id_S2_mean>0) diag_S2_mean(I,J,K) = S2_mean(ii,jj,kc(ii,jj,K))
@@ -1221,7 +1222,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
           enddo
         endif
       else  ! Land points.
-        do concurrent( K=1:nz+1 )
+        do K=1,nz+1
           kappa_full(ii,jj,K) = 0.0 ; tke_full(ii,jj,K) = 0.0
         enddo
       endif
@@ -1257,17 +1258,12 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     ! This conversion factor is required to allow for arbitrary fractional powers of the diffusivities.
     mks_to_HZ_T = 1.0 /  GV%HZ_T_to_MKS
 
-    !   The thickness weights are the only thing here that needs h_vrt, and h_vrt is blocked, so
-    ! the values written by the vertex block loop above are gone by now.  Rather than keep a
-    ! domain-sized copy of it, the interpolation is repeated a block of tracer points at a time.
-    ! A tracer point reads the vertices at I-1 and I, so a block fills one more column and row
-    ! than it writes and ii=1 is the vertex at itstart-1, one to the left of the block.
-    ! Consecutive blocks stride by delta_i and delta_j and share that overlapping edge, exactly as
-    ! in the vertex loop above, but with the overlap at the near end rather than the far one.
+    ! Stide by delta_i/j to account for stencils when calculating h at adjacent vertices
     do jtstart=G%jsc,G%jec,delta_j ; do itstart=G%isc,G%iec,delta_i
       itend = min(itstart + delta_i - 1, G%iec)
       jtend = min(jtstart + delta_j - 1, G%jec)
 
+      ! +2 so that we write h_vrt over the entire ni/njblocks
       do concurrent( k=1:nz, jj=1:jtend-jtstart+2, ii=1:itend-itstart+2 ) DO_LOCALITY(local(I, J))
         I = itstart + ii - 2 ; J = jtstart + jj - 2
         h_vrt(ii,jj,k) = ((G%mask2dT(i,j) * h(i,j,k) + G%mask2dT(i+1,j+1) * h(i+1,j+1,k)) + &
@@ -1277,6 +1273,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
       enddo
 
       if (CS%VS_GeometricMean) then
+        ! +1 so that we only read h_vrt over delta_i/j
         do concurrent( K=2:nz, jj=1:jtend-jtstart+1, ii=1:itend-itstart+1 ) &
                      DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot, I, J))
           I = itstart + ii - 1 ; J = jtstart + jj - 1
@@ -1302,6 +1299,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
           endif
         enddo
       else   ! Use thickness-weighted arithmetic mean diffusivities.
+        ! +1 so that we only read h_vrt over delta_i/j
         do concurrent( K=2:nz, jj=1:jtend-jtstart+1, ii=1:itend-itstart+1 ) &
                      DO_LOCALITY(local(h_SW, h_NE, h_NW, h_SE, I_htot, I, J))
           I = itstart + ii - 1 ; J = jtstart + jj - 1
@@ -1374,10 +1372,10 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
   !$omp target exit data map(delete: diag_N2_init, diag_S2_init, diag_N2_mean, diag_S2_mean, &
   !$omp &                            dz_3d, h_at_u, h_at_v, kappa_vertex, h_vrt, dz_vrt, &
   !$omp &                            u_vrt, v_vrt, T_vrt, S_vrt, rho_vrt, kappa_full, tke_full, &
-  !$omp &                            Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, a1, &
+  !$omp &                            Idz, h_lay, dz_lay, u0xdz, v0xdz, T0xdz, S0xdz, &
   !$omp &                            kappa, tke, kappa_avg, tke_avg, N2_init, S2_init, N2_mean, S2_mean, &
   !$omp &                            I_dz_int, u, v, T, Sal, pressure, T_int, Sal_int, dbuoy_dT, dbuoy_dS, &
-  !$omp &                            dSpV_dT, dSpV_dS, rho_int, c1, kc, kf, nzc_2d)
+  !$omp &                            dSpV_dT, dSpV_dS, rho_int, a1_col, c1_col, kc, kf, nzc_2d)
 
 end subroutine Calc_kappa_shear_vertex
 
@@ -1442,7 +1440,8 @@ pure subroutine kappa_shear_column(kappa, tke, dt, nzc, f2, dbuoy_dT, dbuoy_dS, 
   type(Kappa_shear_CS),    intent(in)    :: CS     !< The control structure returned by a previous
                                                    !! call to kappa_shear_init.
   type(unit_scale_type),   intent(in)    :: US     !< A dimensional unit scaling type
-  integer,                 intent(in)    :: i, j   !< The horizontal indices of the column being processed.
+  integer,                 intent(in)    :: i      !< The i index of the column being processed.
+  integer,                 intent(in)    :: j      !< The j index of the column being processed.
 
   ! Local variables
   ! In GPU builds these locals have compile-time-constant sizes so each device call uses
