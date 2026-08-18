@@ -231,8 +231,9 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     nzc_2d             ! The number of interfaces in the column after massless layers
                     ! have been merged into nearby massive layers.
 
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
-    dz_3d       ! Vertical distance between interface heights [Z ~> m].
+  real, dimension(merge(G%iec-G%isc+1, CS%niblock, CS%niblock==0), &
+                  merge(G%jec-G%jsc+1, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
+    dz_3d       ! Vertical distance between interface heights [Z ~> m], block-local.
 
   real, dimension(SZK_(GV)+1) :: &
     a1_col, &   ! a1 is the coupling between adjacent interfaces in the TKE,
@@ -308,7 +309,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
     iie = ieb - isb + 1 ; jje = jeb - jsb + 1
 
     ! Convert layer thicknesses into geometric thickness in height units.
-    call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload=.true., &
+    call thickness_to_dz(h, tv, dz_3d, G, GV, US, niB=nii, njB=njj, do_offload=.true., &
                          i_lo=isb, i_hi=ieb, j_lo=jsb, j_hi=jeb)
 
     ! Zero out arrays passed to density derivative calculation to prevent uninitialized values
@@ -345,7 +346,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
 
           kc(ii,jj,k) = nzc
           h_lay(ii,jj,nzc) = h_lay(ii,jj,nzc) + h(i,j,k)
-          dz_lay(ii,jj,nzc) = dz_lay(ii,jj,nzc) + dz_3d(i,j,k)
+          dz_lay(ii,jj,nzc) = dz_lay(ii,jj,nzc) + dz_3d(ii,jj,k)
           u0xdz(ii,jj,nzc) = u0xdz(ii,jj,nzc) + u_in(i,j,k)*h(i,j,k)
           v0xdz(ii,jj,nzc) = v0xdz(ii,jj,nzc) + v_in(i,j,k)*h(i,j,k)
           if (use_temperature) then
@@ -377,7 +378,7 @@ subroutine Calculate_kappa_shear(u_in, v_in, h, tv, p_surf, kappa_io, tke_io, &
       else
         do k=1,nz
           h_lay(ii,jj,k) = h(i,j,k)
-          dz_lay(ii,jj,k) = dz_3d(i,j,k)
+          dz_lay(ii,jj,k) = dz_3d(ii,jj,k)
           u0xdz(ii,jj,k) = u_in(i,j,k)*h_lay(ii,jj,k) ; v0xdz(ii,jj,k) = v_in(i,j,k)*h_lay(ii,jj,k)
         enddo
         if (use_temperature) then
@@ -685,8 +686,10 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     diag_N2_mean, & ! Diagnostic of N2 averaged over the timestep applied [T-2 ~> s-2]
     diag_S2_mean    ! Diagnostic of S2 averaged over the timestep applied [T-2 ~> s-2]
 
-  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
-    dz_3d           ! Vertical distance between interface heights [Z ~> m].
+  real, dimension(merge(G%iecB-(G%isc-1)+2, CS%niblock, CS%niblock==0), &
+                  merge(G%jecB-(G%jsc-1)+2, CS%njblock, CS%njblock==0), SZK_(GV)) :: &
+    dz_3d           ! Vertical distance between interface heights [Z ~> m], block-local, with the
+                    ! same one-column/row overlap as h_at_u and h_at_v to support the corner reads.
   real, dimension(SZIB_(G),SZJB_(G),SZK_(GV)+1) :: &
     kappa_vertex    ! Diffusivity at interfaces and vertices [H Z T-1 ~> m2 s-1 or Pa s]
   !   h_at_u and h_at_v are the reason consecutive blocks overlap: the corner interpolation below
@@ -843,7 +846,7 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
     IIe = IebB - IsbB + 1 ; JJe = JebB - JsbB + 1
 
     ! Convert layer thicknesses into geometric thickness in height units.
-    call thickness_to_dz(h, tv, dz_3d, G, GV, US, do_offload=.true., &
+    call thickness_to_dz(h, tv, dz_3d, G, GV, US, niB=nIIB, njB=nJJB, do_offload=.true., &
                          i_lo=IsbB, i_hi=IebB_read, j_lo=JsbB, j_hi=JebB_read)
 
     if (CS%vertex_shear_OBC_bug) then
@@ -896,8 +899,8 @@ subroutine Calc_kappa_shear_vertex(u_in, v_in, h, T_in, S_in, tv, p_surf, kappa_
                    (G%mask2dT(i+1,j) * h(i+1,j,k) + G%mask2dT(i,j+1) * h(i,j+1,k)) ) / &
                   ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
                    (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
-      dz_vrt(II,JJ,k) = ((G%mask2dT(i,j) * dz_3d(i,j,k) + G%mask2dT(i+1,j+1) * dz_3d(i+1,j+1,k)) + &
-                    (G%mask2dT(i+1,j) * dz_3d(i+1,j,k) + G%mask2dT(i,j+1) * dz_3d(i,j+1,k)) ) / &
+      dz_vrt(II,JJ,k) = ((G%mask2dT(i,j) * dz_3d(II,JJ,k) + G%mask2dT(i+1,j+1) * dz_3d(II+1,JJ+1,k)) + &
+                    (G%mask2dT(i+1,j) * dz_3d(II+1,JJ,k) + G%mask2dT(i,j+1) * dz_3d(II,JJ+1,k)) ) / &
                    ((G%mask2dT(i,j) + G%mask2dT(i+1,j+1)) + &
                     (G%mask2dT(i+1,j) + G%mask2dT(i,j+1)) + 1.0e-36 )
 !       h_vrt(II,JJ,k) = 0.25*((h(i,j,k) + h(i+1,j+1,k)) + (h(i+1,j,k) + h(i,j+1,k)))

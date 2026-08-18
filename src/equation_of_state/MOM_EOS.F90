@@ -992,6 +992,7 @@ subroutine calculate_density_derivs_1d(T, S, pressure, drho_dT, drho_dS, EOS, do
 
 end subroutine calculate_density_derivs_1d
 
+
 !> Calls the appropriate subroutine to calculate density derivatives for 1-D array inputs.
 subroutine calculate_density_derivs_2d(T, S, pressure, drho_dT, drho_dS, EOS, dom)
   real, intent(in) :: T(:,:)
@@ -1105,10 +1106,6 @@ subroutine calculate_density_derivs_3d(T, S, pressure, drho_dT, drho_dS, EOS, do
   if (all([EOS%RL2_T2_to_Pa, EOS%C_to_degC, EOS%S_to_ppt] == 1.)) then
     call EOS%type%calculate_density_derivs_3d(T, S, pressure, drho_dT, drho_dS, domain)
   else
-    ! These are plain array-section assignments, not do concurrent, so under
-    ! -gpu=mem:separate they would run on the host against stale host memory for
-    ! T/S/pressure (only ever written on the device) instead of the device-resident
-    ! data the do-concurrent kernel below (and its caller) actually use.
     do concurrent (k=ks:ke, j=js:je, i=is:ie)
       press(i,j,k) = EOS%RL2_T2_to_Pa * pressure(i,j,k)
       Ta(i,j,k) = EOS%C_to_degC * T(i,j,k)
@@ -1122,10 +1119,6 @@ subroutine calculate_density_derivs_3d(T, S, pressure, drho_dT, drho_dS, EOS, do
   if (present(scale)) rho_scale = rho_scale * scale
   dRdT_scale = rho_scale * EOS%C_to_degC
   dRdS_scale = rho_scale * EOS%S_to_ppt
-  ! As above, drho_dT/drho_dS were just written by a do-concurrent kernel directly to
-  ! device memory (they are present in the device data environment via the caller's
-  ! target enter data). A plain host array-section assignment here would read/write
-  ! the stale host copy instead, silently discarding this scaling on the device.
   if (dRdT_scale /= 1.) then
     do concurrent (k=ks:ke, j=js:je, i=is:ie)
       drho_dT(i,j,k) = dRdT_scale * drho_dT(i,j,k)
