@@ -293,6 +293,7 @@ subroutine create_MOM_file(IO_handle, filename, vars, novars, fields, &
   type(domain1d) :: x_domain, y_domain
   integer        :: position, numaxes, pack, thread, k, n, m
   integer        :: num_extra_dims ! The number of extra possible dimensions from extra_axes
+  integer        :: first_extra    ! The first entry in dim_names that is added after any vertical axis
   integer        :: isg, ieg, jsg, jeg, IsgB, IegB, JsgB, JegB
   integer        :: var_periods, num_periods=0
   real, dimension(:), allocatable :: axis_val ! Axis label values [various]
@@ -515,7 +516,17 @@ subroutine create_MOM_file(IO_handle, filename, vars, novars, fields, &
         numaxes = 2 ; axes(1) = axis_lonq ; axes(2) = axis_lath ; ax_name(1) = "lonq" ; ax_name(2) = "lath"
       case (NORTH_FACE)
         numaxes = 2 ; axes(1) = axis_lonh ; axes(2) = axis_latq ; ax_name(1) = "lonh" ; ax_name(2) = "latq"
-      case (0) ! Do nothing.
+      case (0)
+        ! Variables without horizontal axes may use the first two named extra axes in their place,
+        ! so that they precede any vertical axis (e.g. a list of points along an open boundary).
+        do n=1,2 ; if (len_trim(vars(k)%dim_names(n)) > 0) then
+          do m=1,num_extra_dims
+            if (lowercase(trim(vars(k)%dim_names(n))) == lowercase(trim(extra_axes(m)%name))) then
+              numaxes = numaxes+1 ; axes(numaxes) = more_axes(m) ; ax_name(numaxes) = vars(k)%dim_names(n)
+              exit
+            endif
+          enddo
+        endif ; enddo
       case default
         call MOM_error(WARNING, "MOM_io create_file: "//trim(vars(k)%name)//&
                         " has unrecognized position, hor_grid = "//trim(vars(k)%hor_grid))
@@ -535,7 +546,9 @@ subroutine create_MOM_file(IO_handle, filename, vars, novars, fields, &
                " of variable "//trim(vars(k)%name)//" in "//trim(filename)//&
                " is being set inconsistently as "//trim(vars(k)%dim_names(n)))
     enddo
-    do n=numaxes+1,5 ; if (len_trim(vars(k)%dim_names(n)) > 0) then
+    ! For variables without horizontal axes, dim_names(1:2) were used above, ahead of any vertical axis.
+    first_extra = numaxes+1 ; if (position == 0) first_extra = 3
+    do n=first_extra,5 ; if (len_trim(vars(k)%dim_names(n)) > 0) then
       dim_found = .false.
       do m=1,num_extra_dims
         if (lowercase(trim(vars(k)%dim_names(n))) == lowercase(trim(extra_axes(m)%name))) then
