@@ -132,6 +132,7 @@ interface MOM_write_field
   module procedure MOM_write_field_4d
   module procedure MOM_write_field_3d
   module procedure MOM_write_field_2d
+  module procedure MOM_write_field_2d_nodomain
   module procedure MOM_write_field_1d
   module procedure MOM_write_field_0d
 end interface MOM_write_field
@@ -2979,6 +2980,59 @@ subroutine MOM_write_field_1d(IO_handle, field_md, field, tstamp, fill_value, sc
     deallocate(array)
   endif
 end subroutine MOM_write_field_1d
+
+!> Write a 2d field that is not domain decomposed to an output file.  The full field should be
+!! available on the PE (or PEs) that do the writing.
+subroutine MOM_write_field_2d_nodomain(IO_handle, field_md, field, tstamp, fill_value, scale, unscale, &
+                                       zero_zeros)
+  class(MOM_file),        intent(inout) :: IO_handle  !< Handle for a file that is open for writing
+  type(MOM_field),        intent(in)    :: field_md   !< Field type with metadata
+  real, dimension(:,:),   intent(in)    :: field      !< Field to write in arbitrary units [A ~> a]
+  real,         optional, intent(in)    :: tstamp     !< Model timestamp, often in [days]
+  real,         optional, intent(in)    :: fill_value !< Missing data fill value [a]
+  real,         optional, intent(in)    :: scale      !< A scaling factor that the field is multiplied by before
+                                                      !! it is written [a A-1 ~> 1], for example to convert it
+                                                      !! from its internal units to the desired units for output
+  real,         optional, intent(in)    :: unscale    !< A scaling factor that the field is multiplied by before
+                                                      !! it is written [a A-1 ~> 1], for example to convert it
+                                                      !! from its internal units to the desired units for output.
+                                                      !! Here scale and unscale are synonymous, but unscale
+                                                      !! takes precedence if both are present.
+  logical,      optional, intent(in)    :: zero_zeros !< If present and true, convert negative zeros
+                                                      !! into ordinary signless zeros.
+
+  ! Local variables
+  real, dimension(:,:), allocatable :: array ! A rescaled copy of field in arbitrary unscaled units [a]
+  real :: scale_fac ! A scaling factor to use before writing the array [a A-1 ~> 1]
+  logical :: design_zeros ! If true, convert negative zeros into ordinary signless zeros.
+  integer :: i, j
+
+  scale_fac = 1.0 ; if (present(scale)) scale_fac = scale
+  if (present(unscale)) scale_fac = unscale
+
+  design_zeros = .false. ; if (present(zero_zeros)) design_zeros = zero_zeros
+
+  if ((scale_fac == 1.0) .and. (.not.design_zeros)) then
+    call IO_handle%write_field(field_md, field, tstamp=tstamp)
+  else
+    allocate(array(size(field,1), size(field,2)))
+    do j=1,size(field,2) ; do i=1,size(field,1)
+      array(i,j) = scale_fac * field(i,j)
+    enddo ; enddo
+    if (present(fill_value)) then
+      do j=1,size(field,2) ; do i=1,size(field,1)
+        if (field(i,j) == fill_value) array(i,j) = fill_value
+      enddo ; enddo
+    endif
+    if (design_zeros) then ! Convert negative zeros into zeros
+      do j=1,size(field,2) ; do i=1,size(field,1)
+        if (array(i,j) == 0.0) array(i,j) = 0.0
+      enddo ; enddo
+    endif
+    call IO_handle%write_field(field_md, array, tstamp=tstamp)
+    deallocate(array)
+  endif
+end subroutine MOM_write_field_2d_nodomain
 
 !> Write a 0d field to an output file
 subroutine MOM_write_field_0d(IO_handle, field_md, field, tstamp, fill_value, scale, unscale, zero_zeros)

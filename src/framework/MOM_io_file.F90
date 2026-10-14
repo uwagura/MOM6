@@ -222,6 +222,7 @@ type, abstract :: MOM_file
       write_field_4d, &
       write_field_3d, &
       write_field_2d, &
+      write_field_2d_nodomain, &
       write_field_1d, &
       write_field_0d, &
       write_field_axis
@@ -232,6 +233,8 @@ type, abstract :: MOM_file
   procedure(i_write_field_3d), deferred :: write_field_3d
   !> Write a 2D field to the MOM file
   procedure(i_write_field_2d), deferred :: write_field_2d
+  !> Write a 2D field without a domain decomposition to the MOM file
+  procedure(i_write_field_2d_nodomain), deferred :: write_field_2d_nodomain
   !> Write a 1D field to the MOM file
   procedure(i_write_field_1d), deferred :: write_field_1d
   !> Write a 0D field to the MOM file
@@ -289,6 +292,8 @@ type, extends(MOM_file) :: MOM_infra_file
   procedure :: write_field_3d => write_field_3d_infra
   !> Write a 2D field to the MOM framework file
   procedure :: write_field_2d => write_field_2d_infra
+  !> Write a 2D field without a domain decomposition to the MOM framework file
+  procedure :: write_field_2d_nodomain => write_field_2d_nodomain_infra
   !> Write a 1D field to the MOM framework file
   procedure :: write_field_1d => write_field_1d_infra
   !> Write a 0D field to the MOM framework file
@@ -358,6 +363,8 @@ type, extends(MOM_file) :: MOM_netcdf_file
   procedure :: write_field_3d => write_field_3d_nc
   !> Write a 2D field to the MOM netcdf file
   procedure :: write_field_2d => write_field_2d_nc
+  !> Write a 2D field without a domain decomposition to the MOM netcdf file
+  procedure :: write_field_2d_nodomain => write_field_2d_nodomain_nc
   !> Write a 1D field to the MOM netcdf file
   procedure :: write_field_1d => write_field_1d_nc
   !> Write a 0D field to the MOM netcdf file
@@ -557,6 +564,20 @@ interface
     real, optional, intent(in) :: fill_value
       !< Missing data fill value
   end subroutine i_write_field_2d
+
+
+  !> Interface to write_field_2d_nodomain()
+  subroutine i_write_field_2d_nodomain(handle, field_md, field, tstamp)
+    import :: MOM_file, MOM_field
+    class(MOM_file), intent(inout) :: handle
+      !< Handle for a file that is open for writing
+    type(MOM_field), intent(in) :: field_md
+      !< Field type with metadata
+    real, dimension(:,:), intent(in) :: field
+      !< Field to write
+    real, optional, intent(in) :: tstamp
+      !< Model time of this field
+  end subroutine i_write_field_2d_nodomain
 
 
   !> Interface to write_field_1d()
@@ -1165,6 +1186,32 @@ subroutine write_field_2d_infra(handle, field_md, MOM_domain, field, tstamp, &
 end subroutine write_field_2d_infra
 
 
+!> Write a 2D field that is not domain decomposed to the MOM framework file
+subroutine write_field_2d_nodomain_infra(handle, field_md, field, tstamp)
+  class(MOM_infra_file), intent(inout) :: handle
+    !< Handle for a file that is open for writing
+  type(MOM_field), intent(in) :: field_md
+    !< Field type with metadata
+  real, dimension(:,:), intent(in) :: field
+    !< Field to write
+  real, optional, intent(in) :: tstamp
+    !< Model time of this field
+
+  type(fieldtype) :: field_infra
+  real, allocatable :: unscaled_field(:,:) ! An unscaled version of field for output [a]
+
+  field_infra = handle%fields%get(field_md%label)
+  if (field_md%conversion == 1.0) then
+    call write_field(handle%handle_infra, field_infra, field, tstamp=tstamp)
+  else
+    allocate(unscaled_field, source=field)
+    unscaled_field(:,:) = field_md%conversion * field(:,:)
+    call write_field(handle%handle_infra, field_infra, unscaled_field, tstamp=tstamp)
+    deallocate(unscaled_field)
+  endif
+end subroutine write_field_2d_nodomain_infra
+
+
 !> Write a 1D field to the MOM framework file
 subroutine write_field_1d_infra(handle, field_md, field, tstamp)
   class(MOM_infra_file), intent(inout) :: handle
@@ -1609,6 +1656,34 @@ subroutine write_field_2d_nc(handle, field_md, MOM_domain, field, tstamp, &
     deallocate(unscaled_field)
   endif
 end subroutine write_field_2d_nc
+
+
+!> Write a 2D field that is not domain decomposed to the MOM netcdf file
+subroutine write_field_2d_nodomain_nc(handle, field_md, field, tstamp)
+  class(MOM_netcdf_file), intent(inout) :: handle
+    !< Handle for a file that is open for writing
+  type(MOM_field), intent(in) :: field_md
+    !< Field type with metadata
+  real, dimension(:,:), intent(in) :: field
+    !< Field to write
+  real, optional, intent(in) :: tstamp
+    !< Model time of this field
+
+  type(netcdf_field) :: field_nc
+  real, allocatable :: unscaled_field(:,:) ! An unscaled version of field for output [a]
+
+  if (.not. is_root_PE()) return
+
+  field_nc = handle%fields%get(field_md%label)
+  if (field_md%conversion == 1.0) then
+    call write_netcdf_field(handle%handle_nc, field_nc, field, time=tstamp)
+  else
+    allocate(unscaled_field, source=field)
+    unscaled_field(:,:) = field_md%conversion * field(:,:)
+    call write_netcdf_field(handle%handle_nc, field_nc, unscaled_field, time=tstamp)
+    deallocate(unscaled_field)
+  endif
+end subroutine write_field_2d_nodomain_nc
 
 
 !> Write a 1D field to the MOM netcdf file

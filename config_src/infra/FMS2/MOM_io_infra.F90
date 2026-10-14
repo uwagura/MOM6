@@ -78,6 +78,7 @@ interface write_field
   module procedure write_field_4d
   module procedure write_field_3d
   module procedure write_field_2d
+  module procedure write_field_2d_nodomain
   module procedure write_field_1d
   module procedure write_field_0d
   module procedure MOM_write_axis
@@ -1810,6 +1811,25 @@ subroutine write_field_2d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
     call write_data(IO_handle%fileobj, trim(field_md%name), field)
   endif
 end subroutine write_field_2d
+
+!> Write a 2d field that is not domain decomposed to an output file.  The full field should be
+!! available on the PE (or PEs) that do the writing.
+subroutine write_field_2d_nodomain(IO_handle, field_md, field, tstamp)
+  type(file_type),        intent(inout) :: IO_handle  !< Handle for a file that is open for writing
+  type(fieldtype),        intent(in)    :: field_md   !< Field type with metadata
+  real, dimension(:,:),   intent(in)    :: field      !< Field to write
+  real,         optional, intent(in)    :: tstamp     !< Model time of this field
+
+  ! Local variables
+  integer :: time_index
+
+  if (present(tstamp)) then
+    time_index = write_time_if_later(IO_handle, tstamp)
+    call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
+  else
+    call write_data(IO_handle%fileobj, trim(field_md%name), field)
+  endif
+end subroutine write_field_2d_nodomain
 
 !> Write a 1d field to an output file.
 subroutine write_field_1d(IO_handle, field_md, field, tstamp)
