@@ -1568,6 +1568,62 @@ logical function size_mismatch_3d(var_a, var_b, turns, size_msg)
 end function size_mismatch_3d
 
 
+!> Collect the distinct extra (non space-time) axes that are used by a set of variables that will be
+!! written to the same file, matching them by name.
+subroutine collect_file_extra_axes(vars, file_axes, num_axes)
+  type(vardesc), dimension(:), intent(in)    :: vars      !< Descriptions of the variables in a file
+  type(axis_info), dimension(:), allocatable, &
+                               intent(inout) :: file_axes !< The distinct extra axes used by vars
+  integer,                     intent(out)   :: num_axes  !< The number of valid entries in file_axes
+
+  ! Local variables
+  type(axis_info) :: var_axes(5)        ! The extra axes of a variable, padded with placeholder axes
+  type(axis_info), dimension(:), allocatable :: tmp_axes ! Temporary storage while growing file_axes
+  character(len=32) :: dim_names(5)     ! The named dimensions of a variable
+  character(len=64) :: ax_name          ! The name of an axis of a variable
+  character(len=64) :: prev_name        ! The name of an axis that has already been collected
+  integer :: ax_size, prev_size         ! The sizes of an axis of a variable and of a collected axis
+  integer :: k, n, a
+  logical :: used, found
+
+  num_axes = 0
+  if (.not.allocated(file_axes)) allocate(file_axes(5))
+
+  do k=1,size(vars)
+    call query_vardesc(vars(k), extra_axes=var_axes, dim_names=dim_names, caller="collect_file_extra_axes")
+    do a=1,5
+      call get_axis_info(var_axes(a), name=ax_name, ax_size=ax_size)
+      ! Only keep the axes that are named as dimensions of this variable, not the placeholders.
+      used = .false.
+      do n=1,5 ; if (len_trim(dim_names(n)) > 0) then
+        if (lowercase(trim(dim_names(n))) == lowercase(trim(ax_name))) used = .true.
+      endif ; enddo
+      if (.not.used) cycle
+
+      found = .false.
+      do n=1,num_axes
+        call get_axis_info(file_axes(n), name=prev_name, ax_size=prev_size)
+        if (lowercase(trim(prev_name)) == lowercase(trim(ax_name))) then
+          found = .true.
+          if (prev_size /= ax_size) call MOM_error(FATAL, "MOM_restart: The axis "//trim(ax_name)//&
+              " is used with inconsistent sizes by variables in the same restart file.")
+          exit
+        endif
+      enddo
+      if (found) cycle
+
+      if (num_axes >= size(file_axes)) then
+        allocate(tmp_axes(2*size(file_axes)))
+        tmp_axes(1:num_axes) = file_axes(1:num_axes)
+        call move_alloc(tmp_axes, file_axes)
+      endif
+      num_axes = num_axes + 1
+      file_axes(num_axes) = var_axes(a)
+    enddo
+  enddo
+
+end subroutine collect_file_extra_axes
+
 !> save_restart saves all registered variables to restart files.
 subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_rest_files, write_IC)
   character(len=*),        intent(in)    :: directory !< The directory where the restart files
@@ -1618,6 +1674,8 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
   integer :: turns                      ! Number of quarter turns from input to model domain
   integer, parameter :: nmax_extradims = 5
   type(axis_info), dimension(:), allocatable :: extra_axes
+  type(axis_info), dimension(:), allocatable :: file_axes ! The distinct extra axes used in a file
+  integer :: num_file_axes              ! The number of distinct extra axes used in a file
 
   turns = CS%turns
 
@@ -1700,6 +1758,7 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
     do m=start_var,next_var-1
       vars(m-start_var+1) = CS%restart_field(m)%vars
     enddo
+    call collect_file_extra_axes(vars(1:next_var-start_var), file_axes, num_file_axes)
     call query_vardesc(vars(1), t_grid=t_grid, position=pos, caller="save_restart")
     t_grid = adjustl(t_grid)
     if (t_grid(1:1) /= 'p') &
@@ -1745,10 +1804,12 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
 
     if (CS%parallel_restartfiles) then
       call create_MOM_file(IO_handle, trim(restartpath), vars, next_var-start_var, &
-          fields, MULTIPLE, G=G, GV=GV, checksums=check_val, extra_axes=extra_axes)
+          fields, MULTIPLE, G=G, GV=GV, checksums=check_val, &
+          extra_axes=file_axes(1:num_file_axes))
     else
       call create_MOM_file(IO_handle, trim(restartpath), vars, next_var-start_var, &
-          fields, SINGLE_FILE, G=G, GV=GV, checksums=check_val, extra_axes=extra_axes)
+          fields, SINGLE_FILE, G=G, GV=GV, checksums=check_val, &
+          extra_axes=file_axes(1:num_file_axes))
     endif
 
     do m=start_var,next_var-1
