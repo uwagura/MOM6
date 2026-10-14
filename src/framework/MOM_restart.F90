@@ -20,6 +20,8 @@ use MOM_io, only : MULTIPLE, READONLY_FILE, SINGLE_FILE
 use MOM_io, only : CENTER, CORNER, NORTH_FACE, EAST_FACE
 use MOM_io, only : axis_info, get_axis_info
 use MOM_io, only : insert_ensemble_appendix
+use MOM_point_set, only : point_set_type, point_set_gather, point_set_scatter
+use MOM_point_set, only : point_set_axis, point_set_size, point_set_axis_name
 use MOM_string_functions, only : lowercase
 use MOM_time_manager,  only : time_type, time_type_to_real, real_to_time
 use MOM_time_manager,  only : days_in_month, get_date, set_date
@@ -33,6 +35,7 @@ public save_restart, query_initialized, set_initialized, only_read_from_restarts
 public restart_registry_lock, restart_init_end, vardesc
 public restart_files_exist, determine_is_new_run, is_new_run
 public register_restart_field_as_obsolete, register_restart_pair
+public register_restart_point_set_field
 public lock_check
 
 ! A note on unit descriptions in comments: MOM6 uses units that can be rescaled for dimensional
@@ -79,6 +82,11 @@ type field_restart
                                 !! is written to a restart file, usually to convert it to MKS or
                                 !! other standard units [a A-1 ~> 1].  When read, the restart field
                                 !! is multiplied by the reciprocal of this factor.
+  logical :: read_only = .false. !< If true, this field is read from restart files if it is found,
+                                !! but it is never written, for example to read an older format.
+  type(point_set_type), pointer :: pts => NULL() !< If associated, this field is stored in files as a
+                                !! list of the values at the points in this set, rather than as a
+                                !! domain-decomposed array.
 end type field_restart
 
 !> A structure to store information about restart fields that are no longer used
@@ -207,7 +215,7 @@ subroutine register_restart_field_as_obsolete(field_name, replacement_name, CS)
 end subroutine register_restart_field_as_obsolete
 
 !> Register a 3-d field for restarts, providing the metadata in a structure
-subroutine register_restart_field_ptr3d(f_ptr, var_desc, mandatory, CS, conversion)
+subroutine register_restart_field_ptr3d(f_ptr, var_desc, mandatory, CS, conversion, read_only)
   real, dimension(:,:,:), &
                       target, intent(in) :: f_ptr     !< A pointer to the field to be read or written
                                                       !! in arbitrary rescaled units [A ~> a]
@@ -217,6 +225,8 @@ subroutine register_restart_field_ptr3d(f_ptr, var_desc, mandatory, CS, conversi
   type(MOM_restart_CS),       intent(inout) :: CS     !< MOM restart control struct
   real,             optional, intent(in) :: conversion !< A factor to multiply a restart field by
                                                       !! before it is written [a A-1 ~> 1], 1 by default.
+  logical,          optional, intent(in) :: read_only !< If present and true, this field is read from
+                                                      !! the restart files if it is found, but never written.
 
   if (.not.CS%initialized) call MOM_error(FATAL, "MOM_restart " // &
       "register_restart_field: Module must be initialized before it is used.")
@@ -232,6 +242,9 @@ subroutine register_restart_field_ptr3d(f_ptr, var_desc, mandatory, CS, conversi
   CS%restart_field(CS%novars)%initialized = .false.
   CS%restart_field(CS%novars)%conv = 1.0
   if (present(conversion)) CS%restart_field(CS%novars)%conv = conversion
+  CS%restart_field(CS%novars)%read_only = .false.
+  if (present(read_only)) CS%restart_field(CS%novars)%read_only = read_only
+  CS%restart_field(CS%novars)%pts => NULL()
   call query_vardesc(CS%restart_field(CS%novars)%vars, &
                      name=CS%restart_field(CS%novars)%var_name, &
                      caller="register_restart_field_ptr3d")
@@ -593,7 +606,7 @@ end subroutine register_restart_field_4d
 
 !> Register a 3-d field for restarts, providing the metadata as individual arguments
 subroutine register_restart_field_3d(f_ptr, name, mandatory, CS, longname, units, conversion, &
-                                     hor_grid, z_grid, t_grid, extra_axes)
+                                     hor_grid, z_grid, t_grid, extra_axes, read_only)
   real, dimension(:,:,:), &
                       target, intent(in) :: f_ptr     !< A pointer to the field to be read or written
                                                       !! in arbitrary rescaled units [A ~> a]
@@ -610,6 +623,8 @@ subroutine register_restart_field_3d(f_ptr, name, mandatory, CS, longname, units
   character(len=*), optional, intent(in) :: t_grid    !< time description: s, p, or 1, 's' if absent
   type(axis_info),  dimension(:), &
                     optional, intent(in) :: extra_axes !< dimensions other than space-time
+  logical,          optional, intent(in) :: read_only !< If present and true, this field is read from
+                                                      !! the restart files if it is found, but never written.
 
   type(vardesc) :: vd
   character(len=32), dimension(:), allocatable :: dim_names
@@ -643,9 +658,49 @@ subroutine register_restart_field_3d(f_ptr, name, mandatory, CS, longname, units
                   z_grid=z_grid, t_grid=t_grid)
   endif
 
-  call register_restart_field_ptr3d(f_ptr, vd, mandatory, CS, conversion)
+  call register_restart_field_ptr3d(f_ptr, vd, mandatory, CS, conversion, read_only)
 
 end subroutine register_restart_field_3d
+
+!> Register a 3-d field for restarts that is stored in the restart files as a list of the values
+!! at the points of a point set by the number of layers, rather than as a domain-decomposed array.
+!! This must be called on all PEs, including those with none of the points in their memory.
+subroutine register_restart_point_set_field(f_ptr, pts, name, mandatory, CS, longname, units, conversion)
+  real, dimension(:,:,:), &
+                      target, intent(in) :: f_ptr     !< A pointer to the local array with the field,
+                                                      !! indexed as described by pts, with the layers
+                                                      !! in the third dimension, in arbitrary rescaled
+                                                      !! units [A ~> a]
+  type(point_set_type),       target, intent(in) :: pts !< The points of f_ptr that are stored
+  character(len=*),           intent(in) :: name      !< variable name to be used in the restart file
+  logical,                    intent(in) :: mandatory !< If true, the run will abort if this field is not
+                                                      !! successfully read from the restart file.
+  type(MOM_restart_CS),       intent(inout) :: CS     !< MOM restart control struct
+  character(len=*), optional, intent(in) :: longname  !< variable long name
+  character(len=*), optional, intent(in) :: units     !< variable units
+  real,             optional, intent(in) :: conversion !< A factor to multiply a restart field by
+                                                      !! before it is written [a A-1 ~> 1], 1 by default.
+
+  ! Local variables
+  type(vardesc) :: vd
+  type(axis_info) :: pts_axis(1)  ! The axis of the list of points
+
+  if (.not.CS%initialized) call MOM_error(FATAL, "MOM_restart: " // &
+      "register_restart_point_set_field: Module must be initialized before "//&
+      "it is used to register "//trim(name))
+  if (len_trim(name) > len(CS%restart_field(1)%var_name)) call MOM_error(FATAL, "MOM_restart: " // &
+      "register_restart_point_set_field: The restart field name "//trim(name)//" is too long.")
+
+  call lock_check(CS, name=name)
+
+  pts_axis(1) = point_set_axis(pts)
+  vd = var_desc(name, units=units, longname=longname, hor_grid='1', z_grid='L', t_grid='s', &
+                dim_names=(/point_set_axis_name(pts)/), extra_axes=pts_axis)
+
+  call register_restart_field_ptr3d(f_ptr, vd, mandatory, CS, conversion)
+  if (CS%novars <= CS%max_fields) CS%restart_field(CS%novars)%pts => pts
+
+end subroutine register_restart_point_set_field
 
 !> Register a 2-d field for restarts, providing the metadata as individual arguments
 subroutine register_restart_field_2d(f_ptr, name, mandatory, CS, longname, units, conversion, &
@@ -1676,6 +1731,12 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
   type(axis_info), dimension(:), allocatable :: extra_axes
   type(axis_info), dimension(:), allocatable :: file_axes ! The distinct extra axes used in a file
   integer :: num_file_axes              ! The number of distinct extra axes used in a file
+  integer :: write_ind(CS%max_fields)   ! The indices of the fields that are written
+  integer :: nwrite                     ! The number of fields that are written
+  integer :: nv                         ! The number of fields in the current file
+  integer :: n, k
+  type(p2d), allocatable :: lists(:)    ! Complete lists of the values of the point-set fields in
+                                        ! the current file, in the units of the file [a]
 
   turns = CS%turns
 
@@ -1716,12 +1777,19 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
   ! Determine if there is a filename_appendix (used for ensemble runs).
   call insert_ensemble_appendix(restartname, CS%ensemble_appendix_prefix)
 
+  ! Make a list of the fields that are written, omitting those that are only read for compatibility.
+  nwrite = 0
+  do m=1,CS%novars ; if (.not.CS%restart_field(m)%read_only) then
+    nwrite = nwrite + 1 ; write_ind(nwrite) = m
+  endif ; enddo
+
   next_var = 1
-  do while (next_var <= CS%novars )
+  do while (next_var <= nwrite)
     start_var = next_var
     size_in_file = 8*(2*G%Domain%niglobal+2*G%Domain%njglobal+2*nz+1000)
 
-    do m=start_var,CS%novars
+    do n=start_var,nwrite
+      m = write_ind(n)
       call query_vardesc(CS%restart_field(m)%vars, position=pos, &
                          z_grid=z_grid, t_grid=t_grid, caller="save_restart", &
                          extra_axes=extra_axes)
@@ -1732,13 +1800,14 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
         var_sz = var_sz*extra_axes(na)%ax_size
       enddo
 
-      if ((m==start_var) .OR. (size_in_file < max_file_size-var_sz)) then
+      if ((n==start_var) .OR. (size_in_file < max_file_size-var_sz)) then
         size_in_file = size_in_file + var_sz
       else ; exit
       endif
 
     enddo
-    next_var = m
+    next_var = n
+    nv = next_var - start_var  ! The number of fields in this file
 
     restartpath = trim(directory) // trim(restartname)
 
@@ -1755,19 +1824,31 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
       restartpath = trim(restartpath)//".nc"
     endif
 
-    do m=start_var,next_var-1
-      vars(m-start_var+1) = CS%restart_field(m)%vars
+    do k=1,nv
+      vars(k) = CS%restart_field(write_ind(start_var+k-1))%vars
     enddo
-    call collect_file_extra_axes(vars(1:next_var-start_var), file_axes, num_file_axes)
+    call collect_file_extra_axes(vars(1:nv), file_axes, num_file_axes)
     call query_vardesc(vars(1), t_grid=t_grid, position=pos, caller="save_restart")
     t_grid = adjustl(t_grid)
     if (t_grid(1:1) /= 'p') &
       call modify_vardesc(vars(1), t_grid='s', caller="save_restart")
 
-    !Prepare the checksum of the restart fields to be written to restart files
-    do m=start_var,next_var-1
+    ! Gather the complete lists of values of the point-set fields in this file on every PE.
+    allocate(lists(nv))
+    do k=1,nv
+      m = write_ind(start_var+k-1)
+      if (associated(CS%restart_field(m)%pts)) then
+        allocate(lists(k)%p(point_set_size(CS%restart_field(m)%pts), size(CS%var_ptr3d(m)%p, 3)))
+        call point_set_gather(CS%restart_field(m)%pts, CS%var_ptr3d(m)%p, lists(k)%p, &
+                              unscale=CS%restart_field(m)%conv)
+      endif
+    enddo
 
-      call query_vardesc(vars(m-start_var+1), position=pos, name=var_name, caller="save_restart")
+    !Prepare the checksum of the restart fields to be written to restart files
+    do k=1,nv
+      m = write_ind(start_var+k-1)
+
+      call query_vardesc(vars(k), position=pos, name=var_name, caller="save_restart")
       if (modulo(turns, 2) == 0) then
         call get_checksum_loop_ranges(G, CS, pos, isL, ieL, jsL, jeL)
       else   ! Note that G is always the unrotated grid as it is seen by the driver level.
@@ -1782,6 +1863,8 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
           write(mesg, '(" is in NORTH_FACE position, checksum range",4(1x,I0))') isL, ieL, jsL, jeL
         elseif (pos == EAST_FACE) then
           write(mesg, '(" is in EAST_FACE position, checksum range",4(1x,I0))') isL, ieL, jsL, jeL
+        elseif (associated(CS%restart_field(m)%pts)) then
+          write(mesg, '(" is a list of ",I0," points")') size(lists(k)%p, 1)
         else
           write(mesg, '(" is in another position, ",I0,", checksum range",4(1x,I0))') pos, isL, ieL, jsL, jeL
         endif
@@ -1789,54 +1872,64 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
       endif
 
       conv = CS%restart_field(m)%conv
-      if (associated(CS%var_ptr3d(m)%p)) then
-        check_val(m-start_var+1,1) = chksum(CS%var_ptr3d(m)%p(isL:ieL,jsL:jeL,:), turns=-turns, unscale=conv)
+      if (associated(CS%restart_field(m)%pts)) then
+        ! The list is identical on every PE and is already in the units of the file.
+        check_val(k,1) = chksum(lists(k)%p, pelist=(/PE_here()/))
+      elseif (associated(CS%var_ptr3d(m)%p)) then
+        check_val(k,1) = chksum(CS%var_ptr3d(m)%p(isL:ieL,jsL:jeL,:), turns=-turns, unscale=conv)
       elseif (associated(CS%var_ptr2d(m)%p)) then
-        check_val(m-start_var+1,1) = chksum(CS%var_ptr2d(m)%p(isL:ieL,jsL:jeL), turns=-turns, unscale=conv)
+        check_val(k,1) = chksum(CS%var_ptr2d(m)%p(isL:ieL,jsL:jeL), turns=-turns, unscale=conv)
       elseif (associated(CS%var_ptr4d(m)%p)) then
-        check_val(m-start_var+1,1) = chksum(CS%var_ptr4d(m)%p(isL:ieL,jsL:jeL,:,:), turns=-turns, unscale=conv)
+        check_val(k,1) = chksum(CS%var_ptr4d(m)%p(isL:ieL,jsL:jeL,:,:), turns=-turns, unscale=conv)
       elseif (associated(CS%var_ptr1d(m)%p)) then
-        check_val(m-start_var+1,1) = chksum(CS%var_ptr1d(m)%p(:), unscale=conv)
+        check_val(k,1) = chksum(CS%var_ptr1d(m)%p(:), unscale=conv)
       elseif (associated(CS%var_ptr0d(m)%p)) then
-        check_val(m-start_var+1,1) = chksum(CS%var_ptr0d(m)%p, pelist=(/PE_here()/), unscale=conv)
+        check_val(k,1) = chksum(CS%var_ptr0d(m)%p, pelist=(/PE_here()/), unscale=conv)
       endif
     enddo
 
     if (CS%parallel_restartfiles) then
-      call create_MOM_file(IO_handle, trim(restartpath), vars, next_var-start_var, &
+      call create_MOM_file(IO_handle, trim(restartpath), vars, nv, &
           fields, MULTIPLE, G=G, GV=GV, checksums=check_val, &
           extra_axes=file_axes(1:num_file_axes))
     else
-      call create_MOM_file(IO_handle, trim(restartpath), vars, next_var-start_var, &
+      call create_MOM_file(IO_handle, trim(restartpath), vars, nv, &
           fields, SINGLE_FILE, G=G, GV=GV, checksums=check_val, &
           extra_axes=file_axes(1:num_file_axes))
     endif
 
-    do m=start_var,next_var-1
-      if (associated(CS%var_ptr3d(m)%p)) then
-        call MOM_write_field(IO_handle, fields(m-start_var+1), G%Domain, CS%var_ptr3d(m)%p, &
+    do k=1,nv
+      m = write_ind(start_var+k-1)
+      if (associated(CS%restart_field(m)%pts)) then
+        call MOM_write_field(IO_handle, fields(k), lists(k)%p, restart_time, &
+                             zero_zeros=CS%unsigned_zeros)
+      elseif (associated(CS%var_ptr3d(m)%p)) then
+        call MOM_write_field(IO_handle, fields(k), G%Domain, CS%var_ptr3d(m)%p, &
                              restart_time, unscale=CS%restart_field(m)%conv, turns=-turns, &
                              zero_zeros=CS%unsigned_zeros)
       elseif (associated(CS%var_ptr2d(m)%p)) then
-        call MOM_write_field(IO_handle, fields(m-start_var+1), G%Domain, CS%var_ptr2d(m)%p, &
+        call MOM_write_field(IO_handle, fields(k), G%Domain, CS%var_ptr2d(m)%p, &
                              restart_time, unscale=CS%restart_field(m)%conv, turns=-turns, &
                              zero_zeros=CS%unsigned_zeros)
       elseif (associated(CS%var_ptr4d(m)%p)) then
-        call MOM_write_field(IO_handle, fields(m-start_var+1), G%Domain, CS%var_ptr4d(m)%p, &
+        call MOM_write_field(IO_handle, fields(k), G%Domain, CS%var_ptr4d(m)%p, &
                              restart_time, unscale=CS%restart_field(m)%conv, turns=-turns, &
                              zero_zeros=CS%unsigned_zeros)
       elseif (associated(CS%var_ptr1d(m)%p)) then
-        call MOM_write_field(IO_handle, fields(m-start_var+1), CS%var_ptr1d(m)%p, &
+        call MOM_write_field(IO_handle, fields(k), CS%var_ptr1d(m)%p, &
                              restart_time, unscale=CS%restart_field(m)%conv, &
                              zero_zeros=CS%unsigned_zeros)
       elseif (associated(CS%var_ptr0d(m)%p)) then
-        call MOM_write_field(IO_handle, fields(m-start_var+1), CS%var_ptr0d(m)%p, &
+        call MOM_write_field(IO_handle, fields(k), CS%var_ptr0d(m)%p, &
                              restart_time, unscale=CS%restart_field(m)%conv, &
                              zero_zeros=CS%unsigned_zeros)
       endif
     enddo
 
     call IO_handle%close()
+
+    do k=1,nv ; if (associated(lists(k)%p)) deallocate(lists(k)%p) ; enddo
+    deallocate(lists)
 
     num_files = num_files+1
 
@@ -1879,6 +1972,8 @@ subroutine restore_state(filename, directory, day, G, CS)
   logical            :: is_there_a_checksum ! Is there a valid checksum that should be checked.
   integer(kind=int64) :: checksum_file  ! The checksum value recorded in the input file.
   integer(kind=int64) :: checksum_data  ! The checksum value for the data that was read in.
+  real, allocatable :: pts_list(:,:)    ! The list of values of a point-set field, in the units of
+                                        ! the file [a]
 
   if (.not.CS%initialized) call MOM_error(FATAL, "MOM_restart " // &
       "restore_state: Module must be initialized before it is used.")
@@ -1992,6 +2087,13 @@ subroutine restore_state(filename, directory, day, G, CS)
               ! call read_data(unit_path(n), varname, CS%var_ptr2d(m)%p,no_domain=.true., timelevel=1)
             endif
             if (is_there_a_checksum) checksum_data = chksum(CS%var_ptr2d(m)%p(isL:ieL,jsL:jeL), unscale=conv)
+          elseif (associated(CS%restart_field(m)%pts)) then  ! Read a list of values at a set of points.
+            allocate(pts_list(point_set_size(CS%restart_field(m)%pts), size(CS%var_ptr3d(m)%p, 3)))
+            ! The list is not domain decomposed, so every PE reads all of it.
+            call MOM_read_data(unit_path(n), varname, pts_list, G%Domain, timelevel=1, turns=0)
+            if (is_there_a_checksum) checksum_data = chksum(pts_list, pelist=(/PE_here()/))
+            call point_set_scatter(CS%restart_field(m)%pts, pts_list, CS%var_ptr3d(m)%p, scale=scale)
+            deallocate(pts_list)
           elseif (associated(CS%var_ptr3d(m)%p)) then  ! Read a 3d array.
             if (pos /= 0) then
               call MOM_read_data(unit_path(n), varname, CS%var_ptr3d(m)%p, &
@@ -2042,7 +2144,7 @@ subroutine restore_state(filename, directory, day, G, CS)
   ! Check whether any mandatory fields have not been found.
   CS%restart = .true.
   do m=1,CS%novars
-    if (.not.(CS%restart_field(m)%initialized)) then
+    if (.not.(CS%restart_field(m)%initialized) .and. .not.CS%restart_field(m)%read_only) then
       CS%restart = .false.
       if (CS%restart_field(m)%mand_var) then
         call MOM_error(FATAL,"MOM_restart: Unable to find mandatory variable " &
