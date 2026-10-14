@@ -23,11 +23,13 @@ use MOM_interpolate,          only : init_external_field, time_interp_external, 
 use MOM_interpolate,          only : external_field
 use MOM_io,                   only : slasher, field_size, file_exists, stderr, SINGLE_FILE
 use MOM_io,                   only : vardesc, query_vardesc, var_desc
+use MOM_point_set,            only : point_set_type, point_set_init, point_set_end
 use MOM_regridding,           only : regridding_CS
 use MOM_remapping,            only : remappingSchemesDoc, remappingDefaultScheme, remapping_CS
 use MOM_remapping,            only : initialize_remapping, remapping_core_h, end_remapping
 use MOM_restart,              only : register_restart_field, register_restart_pair
 use MOM_restart,              only : query_initialized, set_initialized, MOM_restart_CS
+use MOM_restart,              only : register_restart_point_set_field
 use MOM_string_functions,     only : extract_word, remove_spaces, uppercase, lowercase
 use MOM_tidal_forcing,        only : astro_longitudes, astro_longitudes_init, eq_phase, nodal_fu, tidal_frequency
 use MOM_time_manager,         only : set_date, time_type, time_minus_signed
@@ -442,6 +444,13 @@ type, public :: ocean_OBC_type
                                             !! in unscaled units [conc]
   real, allocatable :: tres_y(:,:,:,:)      !< Array storage of tracer reservoirs for restarts,
                                             !! in unscaled units [conc]
+  logical :: segment_reservoir_restarts = .false. !< If true, the tracer reservoirs are stored in the
+                                            !! restart files as one list of values per segment and tracer.
+  type(point_set_type), allocatable :: seg_pts(:) !< The points along each segment, as they are stored
+                                            !! in the restart files.
+  character(len=32), allocatable :: tres_seg_names(:,:) !< The restart names of the tracer reservoirs on
+                                            !! each segment (first index) for each tracer (second index),
+                                            !! or blank if they are not stored per segment.
   real, allocatable :: h_res_x(:,:,:)       !< Array storage of thickness reservoirs for restarts,
                                             !! [Z ~> m]
   real, allocatable :: h_res_y(:,:,:)       !< Array storage of thickness reservoirs for restarts,
@@ -2376,6 +2385,11 @@ subroutine open_boundary_dealloc(OBC)
   if (allocated(OBC%cff_normal_v)) deallocate(OBC%cff_normal_v)
   if (allocated(OBC%tres_x)) deallocate(OBC%tres_x)
   if (allocated(OBC%tres_y)) deallocate(OBC%tres_y)
+  if (allocated(OBC%seg_pts)) then
+    do n=1,size(OBC%seg_pts) ; call point_set_end(OBC%seg_pts(n)) ; enddo
+    deallocate(OBC%seg_pts)
+  endif
+  if (allocated(OBC%tres_seg_names)) deallocate(OBC%tres_seg_names)
   if (allocated(OBC%h_res_x)) deallocate(OBC%h_res_x)
   if (allocated(OBC%h_res_y)) deallocate(OBC%h_res_y)
   if (associated(OBC%remap_z_CS)) deallocate(OBC%remap_z_CS)
@@ -2575,6 +2589,7 @@ subroutine setup_OBC_tracer_reservoirs(G, GV, OBC, restart_CS)
   real :: I_scale         ! The inverse of the scaling factor for the tracers.
                           ! For salinity the units would be [ppt S-1 ~> 1]
   logical :: set_tres_x, set_tres_y
+  logical :: set_seg  ! False if the reservoir of a tracer on a segment was read from a restart file
   character(len=12) :: x_var_name, y_var_name
   integer :: i, j, k, m, n
 
@@ -2602,7 +2617,14 @@ subroutine setup_OBC_tracer_reservoirs(G, GV, OBC, restart_CS)
       if (associated(segment%tr_Reg)) then ; if (allocated(segment%tr_Reg%Tr(m)%tres)) then
         I_scale = 1.0 ; if (segment%tr_Reg%Tr(m)%scale /= 0.0) I_scale = 1.0 / segment%tr_Reg%Tr(m)%scale
 
-        if (segment%is_E_or_W .and. set_tres_x) then
+        ! Reservoirs that are stored per segment may have been read for this segment.
+        set_seg = .true.
+        if (present(restart_CS) .and. allocated(OBC%tres_seg_names)) then
+          if (len_trim(OBC%tres_seg_names(n,m)) > 0) &
+            set_seg = .not.query_initialized(OBC%tres_seg_names(n,m), restart_CS)
+        endif
+
+        if (segment%is_E_or_W .and. set_tres_x .and. set_seg) then
           I = segment%HI%IsdB
           if (segment%tr_Reg%Tr(m)%is_initialized) then
             do k=1,GV%ke ; do j=segment%HI%jsd,segment%HI%jed
@@ -2613,7 +2635,7 @@ subroutine setup_OBC_tracer_reservoirs(G, GV, OBC, restart_CS)
               OBC%tres_x(I,j,k,m) = I_scale * segment%tr_Reg%Tr(m)%t(i,j,k)
             enddo ; enddo
           endif
-        elseif (segment%is_N_or_S .and. set_tres_y) then
+        elseif (segment%is_N_or_S .and. set_tres_y .and. set_seg) then
           J = segment%HI%JsdB
           if (segment%tr_Reg%Tr(m)%is_initialized) then
             do k=1,GV%ke ; do i=segment%HI%isd,segment%HI%ied
@@ -2702,7 +2724,7 @@ subroutine set_initialized_OBC_tracer_reservoirs(G, OBC, restart_CS)
   type(ocean_OBC_type),           intent(in)    :: OBC !< Open boundary control structure
   type(MOM_restart_CS),           intent(inout) :: restart_CS !< MOM restart control structure
   character(len=12) :: x_var_name, y_var_name
-  integer :: m
+  integer :: m, n
 
   do m=1,OBC%ntr
     ! Set the names of the reservoirs for this tracer in the restart file
@@ -2716,6 +2738,13 @@ subroutine set_initialized_OBC_tracer_reservoirs(G, OBC, restart_CS)
 
     if (OBC%tracer_x_reservoirs_used(m)) call set_initialized(OBC%tres_x, x_var_name, restart_CS)
     if (OBC%tracer_y_reservoirs_used(m)) call set_initialized(OBC%tres_y, y_var_name, restart_CS)
+
+    ! Also record the reservoirs that are stored per segment.
+    if (allocated(OBC%tres_seg_names)) then
+      do n=1,OBC%number_of_segments ; if (len_trim(OBC%tres_seg_names(n,m)) > 0) then
+        call set_initialized(OBC%tres_seg_names(n,m), restart_CS)
+      endif ; enddo
+    endif
   enddo
 
 end subroutine set_initialized_OBC_tracer_reservoirs
@@ -5983,7 +6012,17 @@ subroutine open_boundary_register_restarts(HI, GV, US, OBC, Reg, param_file, res
     endif
   endif
 
-  ! Still painfully inefficient, now in four dimensions.
+  call get_param(param_file, mdl, "OBC_SEGMENT_RESERVOIR_RESTARTS", OBC%segment_reservoir_restarts, &
+                 "If true, the OBC tracer reservoirs are stored in the restart files as one "//&
+                 "variable per segment and tracer that holds only the points along that segment, "//&
+                 "rather than as domain-sized arrays.  Restart files with the older tres_x_### "//&
+                 "and tres_y_### variables can still be read.  If false, only the older format is "//&
+                 "used.  This uses one restart field per segment and tracer, so MAX_FIELDS may need "//&
+                 "to be increased.", default=.true., &
+                 do_not_log=.not.(any(OBC%tracer_x_reservoirs_used) .or. any(OBC%tracer_y_reservoirs_used)))
+
+  ! The domain-sized arrays are used to set up the reservoirs, and when the reservoirs are stored per
+  ! segment, the older domain-sized restart variables are only read, so that older restart files work.
   if (any(OBC%tracer_x_reservoirs_used)) then
     allocate(OBC%tres_x(HI%isdB:HI%iedB,HI%jsd:HI%jed,GV%ke,OBC%ntr), source=0.0)
     do m=1,OBC%ntr
@@ -5991,11 +6030,13 @@ subroutine open_boundary_register_restarts(HI, GV, US, OBC, Reg, param_file, res
         if (modulo(HI%turns, 2) /= 0) then
           write(var_name,'("tres_y_",I3.3)') m
           call register_restart_field(OBC%tres_x(:,:,:,m), var_name, .false., restart_CS, &
-                   longname="Tracer concentration for NS OBCs", units="Conc", hor_grid='v')
+                   longname="Tracer concentration for NS OBCs", units="Conc", hor_grid='v', &
+                   read_only=OBC%segment_reservoir_restarts)
         else
           write(var_name,'("tres_x_",I3.3)') m
           call register_restart_field(OBC%tres_x(:,:,:,m), var_name, .false., restart_CS, &
-                   longname="Tracer concentration for EW OBCs", units="Conc", hor_grid='u')
+                   longname="Tracer concentration for EW OBCs", units="Conc", hor_grid='u', &
+                   read_only=OBC%segment_reservoir_restarts)
         endif
       endif
     enddo
@@ -6007,17 +6048,141 @@ subroutine open_boundary_register_restarts(HI, GV, US, OBC, Reg, param_file, res
         if (modulo(HI%turns, 2) /= 0) then
           write(var_name,'("tres_x_",I3.3)') m
           call register_restart_field(OBC%tres_y(:,:,:,m), var_name, .false., restart_CS, &
-                   longname="Tracer concentration for EW OBCs", units="Conc", hor_grid='u')
+                   longname="Tracer concentration for EW OBCs", units="Conc", hor_grid='u', &
+                   read_only=OBC%segment_reservoir_restarts)
         else
           write(var_name,'("tres_y_",I3.3)') m
           call register_restart_field(OBC%tres_y(:,:,:,m), var_name, .false., restart_CS, &
-                   longname="Tracer concentration for NS OBCs", units="Conc", hor_grid='v')
+                   longname="Tracer concentration for NS OBCs", units="Conc", hor_grid='v', &
+                   read_only=OBC%segment_reservoir_restarts)
         endif
       endif
     enddo
   endif
 
+  if (OBC%segment_reservoir_restarts .and. &
+      (any(OBC%tracer_x_reservoirs_used) .or. any(OBC%tracer_y_reservoirs_used))) &
+    call register_segment_reservoir_restarts(HI, OBC, Reg, restart_CS)
+
 end subroutine open_boundary_register_restarts
+
+!> Set up the points along each OBC segment as they are stored in the restart files, and register
+!! the tracer reservoirs on each segment for restarts as lists of values at those points.  The
+!! points along a segment are listed in order of increasing global index in the unrotated (input)
+!! grid, and the segments are labeled with their numbers in the parameter file, so that the
+!! restart files do not depend on the domain decomposition, grid rotation or segment storage order.
+!! This must be called on all PEs.
+subroutine register_segment_reservoir_restarts(HI, OBC, Reg, restart_CS)
+  type(hor_index_type),       intent(in)    :: HI  !< Horizontal indices of the model grid
+  type(ocean_OBC_type),       pointer       :: OBC !< OBC data structure, data intent(inout)
+  type(tracer_registry_type), pointer       :: Reg !< pointer to tracer registry
+  type(MOM_restart_CS),       intent(inout) :: restart_CS !< MOM restart control structure
+
+  ! Local variables
+  type(OBC_segment_type), pointer :: segment => NULL()
+  integer, allocatable :: i_loc(:), j_loc(:) ! Indices of the local points of a segment in the
+                                    ! domain-sized reservoir arrays
+  integer, allocatable :: p_list(:) ! The positions of the local points in the list of a segment
+  logical, allocatable :: owned(:)  ! True for the local points whose values this PE supplies
+  character(len=32) :: name         ! The restart name of a reservoir on a segment
+  character(len=64) :: full_name    ! The restart name of a reservoir before checking its length
+  character(len=6)  :: seg_str      ! A label for a segment, like seg001
+  character(len=3)  :: tr_str       ! A label for a tracer index
+  logical :: reverse  ! True if the order of the points along a segment is reversed from the
+                      ! model grid to the unrotated grid
+  logical :: own_face ! True if this PE owns the line of faces with the segment
+  integer :: qturns   ! The number of quarter turns from the unrotated to the model grid
+  integer :: n, n_cfg, m, npts, nl, k, i, j, I_face, J_face
+
+  qturns = modulo(HI%turns, 4)
+  allocate(OBC%seg_pts(OBC%number_of_segments))
+  allocate(OBC%tres_seg_names(OBC%number_of_segments, OBC%ntr))
+  OBC%tres_seg_names(:,:) = ""
+
+  do n=1,OBC%number_of_segments
+    segment => OBC%segment(n)
+    n_cfg = n ; if (OBC%reverse_segment_order) n_cfg = OBC%number_of_segments + 1 - n
+    write(seg_str, '("seg",I3.3)') n_cfg
+
+    ! Rotating the grid by one quarter turn maps the unrotated i-index onto the model j-index and
+    ! reverses the unrotated j-index along the model i-index (see rotate_OBC_segment_config).
+    if (segment%is_E_or_W_2) then
+      npts = segment%HI%jeg - segment%HI%jsg + 1
+      reverse = (qturns == 2) .or. (qturns == 3)
+    else
+      npts = segment%HI%ieg - segment%HI%isg + 1
+      reverse = (qturns == 1) .or. (qturns == 2)
+    endif
+
+    nl = 0
+    if (segment%is_E_or_W) then
+      nl = segment%HI%jed - segment%HI%jsd + 1
+    elseif (segment%is_N_or_S) then
+      nl = segment%HI%ied - segment%HI%isd + 1
+    endif
+    allocate(i_loc(nl), j_loc(nl), p_list(nl), owned(nl))
+
+    if (segment%is_E_or_W) then
+      I_face = segment%HI%IsdB
+      ! A PE owns the faces in its computational domain, and the western PEs also own the faces on
+      ! the western edge of the global domain.
+      own_face = ((I_face >= HI%isc) .and. (I_face <= HI%iec)) .or. &
+                 ((I_face == HI%isc-1) .and. (HI%isc + HI%idg_offset == HI%isg))
+      do j=segment%HI%jsd,segment%HI%jed
+        k = j - segment%HI%jsd + 1
+        i_loc(k) = I_face - HI%IsdB + 1 ; j_loc(k) = j - HI%jsd + 1
+        p_list(k) = (j + HI%jdg_offset) - segment%HI%jsg + 1
+        if (reverse) p_list(k) = npts + 1 - p_list(k)
+        owned(k) = own_face .and. (j >= HI%jsc) .and. (j <= HI%jec)
+      enddo
+    elseif (segment%is_N_or_S) then
+      J_face = segment%HI%JsdB
+      ! A PE owns the faces in its computational domain, and the southern PEs also own the faces on
+      ! the southern edge of the global domain.
+      own_face = ((J_face >= HI%jsc) .and. (J_face <= HI%jec)) .or. &
+                 ((J_face == HI%jsc-1) .and. (HI%jsc + HI%jdg_offset == HI%jsg))
+      do i=segment%HI%isd,segment%HI%ied
+        k = i - segment%HI%isd + 1
+        i_loc(k) = i - HI%isd + 1 ; j_loc(k) = J_face - HI%JsdB + 1
+        p_list(k) = (i + HI%idg_offset) - segment%HI%isg + 1
+        if (reverse) p_list(k) = npts + 1 - p_list(k)
+        owned(k) = own_face .and. (i >= HI%isc) .and. (i <= HI%iec)
+      enddo
+    endif
+
+    call point_set_init(OBC%seg_pts(n), "OBC_"//seg_str, npts, i_loc, j_loc, p_list, owned, &
+                        longname="Points along OBC segment "//seg_str(4:6))
+    deallocate(i_loc, j_loc, p_list, owned)
+
+    do m=1,OBC%ntr
+      if (segment%is_E_or_W_2) then
+        if (.not.OBC%tracer_x_reservoirs_used(m)) cycle
+      else
+        if (.not.OBC%tracer_y_reservoirs_used(m)) cycle
+      endif
+      if (m <= Reg%ntr) then
+        full_name = "tres_"//trim(Reg%Tr(m)%name)//"_"//seg_str
+      else
+        write(tr_str, '(I3.3)') m
+        full_name = "tres_"//tr_str//"_"//seg_str
+      endif
+      if (len_trim(full_name) > len(name)) call MOM_error(FATAL, "register_segment_reservoir_restarts: "//&
+          "The restart variable name "//trim(full_name)//" is longer than 32 characters.")
+      name = trim(full_name)
+      OBC%tres_seg_names(n,m) = name
+      if (segment%is_E_or_W_2) then
+        call register_restart_point_set_field(OBC%tres_x(:,:,:,m), OBC%seg_pts(n), name, .false., &
+                 restart_CS, longname="Tracer reservoir concentration on OBC segment "//seg_str(4:6), &
+                 units="Conc")
+      else
+        call register_restart_point_set_field(OBC%tres_y(:,:,:,m), OBC%seg_pts(n), name, .false., &
+                 restart_CS, longname="Tracer reservoir concentration on OBC segment "//seg_str(4:6), &
+                 units="Conc")
+      endif
+    enddo
+  enddo
+
+end subroutine register_segment_reservoir_restarts
 
 !> Update OBC tracer reservoirs (segment%tr_Reg%Tr%tres) using a backward-Euler implicit step,
 !! then copy the result into OBC%tres_x / OBC%tres_y for restart I/O.
