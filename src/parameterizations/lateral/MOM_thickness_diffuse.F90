@@ -797,6 +797,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
   real :: dz_harm       ! Harmonic mean layer vertical extent [Z ~> m].
   real :: c2_dz_u(niblock,njblock,SZK_(GV)+1) ! Wave speed squared divided by dz at u-points [L2 Z-1 T-2 ~> m s-2]
   real :: c2_dz_v(niblock,njblock,SZK_(GV)+1)  ! Wave speed squared divided by dz at v-points [L2 Z-1 T-2 ~> m s-2]
+  real :: c1(niblock,njblock,SZK_(GV)) ! Workspace for streamfn_solver [nondim]
   real :: dzN2_u(niblock,njblock,SZK_(GV)+1) ! Vertical extent times N2 at interfaces above u-points times
                         ! rescaling factors from vertical to horizontal distances [L2 Z-1 T-2 ~> m s-2]
   real :: dzN2_v(niblock,njblock,SZK_(GV)+1)  ! Vertical extent times N2 at interfaces above v-points times
@@ -895,6 +896,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
   !$omp     dzN2_v, Slope_y_PE, slope2_Ratio_v, Sfn_unlim_v, hN2_y_PE, drho_dT_v, drho_dT_dT_hr, &
   !$omp     drho_dS_v, drdj_v, diag_sfn_unlim_y, T_v, S_v, pres_v, drdkDe_v) &
   !$omp   map(to: tv, tv%T, tv%S, meke)
+  !$omp target enter data if(CS%use_FGNV_streamfn) map(alloc: c2_dz_u, c2_dz_v, c1)
   !$omp target enter data if(associated(tv%p_surf)) map(to: tv%p_surf)
   !$omp target enter data if(allocated(MEKE%GM_src)) map(to: MEKE%GM_src)
 
@@ -1221,8 +1223,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
           do K=2,nz
             Sfn_unlim_u(II,jj,K) = (1. + CS%FGNV_scale) * Sfn_unlim_u(II,jj,K)
           enddo
-          ! unsure if this works on GPU due to non-contiguous memory access
-          call streamfn_solver(nz, c2_dz_u(II,jj,:), dzN2_u(II,jj,:), Sfn_unlim_u(II,jj,:))
+          call streamfn_solver(nz, niblock, njblock, II, jj, c2_dz_u, dzN2_u, Sfn_unlim_u, c1)
         else
           do K=2,nz
             Sfn_unlim_u(II,jj,K) = 0.
@@ -1581,7 +1582,7 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
           do K=2,nz
             Sfn_unlim_v(ii,JJ,K) = (1. + CS%FGNV_scale) * Sfn_unlim_v(ii,JJ,K)
           enddo
-          call streamfn_solver(nz, c2_dz_v(ii,JJ,:), dzN2_v(ii,JJ,:), Sfn_unlim_v(ii,JJ,:))
+          call streamfn_solver(nz, niblock, njblock, ii, JJ, c2_dz_v, dzN2_v, Sfn_unlim_v, c1)
         else
           do K=2,nz
             Sfn_unlim_v(ii,JJ,K) = 0.
@@ -1841,45 +1842,52 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
   !$omp     T_u, S_u, dzN2_v, Slope_y_PE, slope2_Ratio_v, Sfn_unlim_v, hN2_y_PE, &
   !$omp     drho_dT_v, drho_dT_dT_hr, drho_dS_v, drdj_v, diag_sfn_unlim_y, T_v, S_v, pres_v, &
   !$omp     drdkDe_v, tv, tv%T, tv%S, meke)
+  !$omp target exit data if(CS%use_FGNV_streamfn) map(release: c2_dz_u, c2_dz_v, c1)
   !$omp target exit data if(associated(tv%p_surf)) map(release: tv%p_surf)
   !$omp target exit data if(allocated(MEKE%GM_src)) map(from: MEKE%GM_src)
 
 end subroutine thickness_diffuse_full
 
-!> Tridiagonal solver for streamfunction at interfaces
-pure subroutine streamfn_solver(nk, c2_h, hN2, sfn)
-  integer,               intent(in)    :: nk   !< Number of layers
-  real, dimension(nk),   intent(in)    :: c2_h !< Wave speed squared over thickness in layers, rescaled to
+!> Tridiagonal solver for streamfunction at interfaces, for a single column of blocked arrays
+pure subroutine streamfn_solver(nk, nii, njj, i, j, c2_h, hN2, sfn, c1)
+  integer, intent(in)    :: nk   !< Number of layers
+  integer, intent(in)    :: nii  !< The i-extent of the blocked arrays
+  integer, intent(in)    :: njj  !< The j-extent of the blocked arrays
+  integer, intent(in)    :: i    !< The i-index within the block of the column to work on
+  integer, intent(in)    :: j    !< The j-index within the block of the column to work on
+  real, dimension(nii,njj,nk+1), intent(in)    :: c2_h !< Wave speed squared over thickness in layers, rescaled to
                                                !! [H L2 Z-2 T-2 ~> m s-2 or kg m-2 s-2]
-  real, dimension(nk+1), intent(in)    :: hN2  !< Thickness times N2 at interfaces times rescaling factors
+  real, dimension(nii,njj,nk+1), intent(in)    :: hN2  !< Thickness times N2 at interfaces times rescaling factors
                                                !! [H L2 Z-2 T-2 ~> m s-2 or kg m-2 s-2]
-  real, dimension(nk+1), intent(inout) :: sfn  !< Streamfunction [H L2 T-1 ~> m3 s-1 or kg s-1] or arbitrary units
+  real, dimension(nii,njj,nk+1), intent(inout) :: sfn  !< Streamfunction [H L2 T-1 ~> m3 s-1 or kg s-1] or
+                                               !! arbitrary units
                                                !! On entry, equals diffusivity times slope.
                                                !! On exit, equals the streamfunction.
+  real, dimension(nii,njj,nk),   intent(inout) :: c1   !< Workspace holding the dependence of the final
+                                               !! streamfunction on the values below [nondim]
   ! Local variables
-  real :: c1(nk)  ! The dependence of the final streamfunction on the values below [nondim]
   real :: d1      ! The complement of c1(k) (i.e., 1 - c1(k)) [nondim]
   real :: b_denom ! A term in the denominator of beta [H L2 Z-2 T-2 ~> m s-2 or kg m-2 s-2]
   real :: beta    ! The normalization for the pivot [Z2 T2 H-1 L-2 ~> s2 m-1 or m2 s2 kg-1]
   integer :: k
   !$omp declare target
 
-  sfn(1) = 0.
-  b_denom = hN2(2) + c2_h(1)
-  beta = 1.0 / ( b_denom + c2_h(2) )
+  sfn(i,j,1) = 0.
+  b_denom = hN2(i,j,2) + c2_h(i,j,1)
+  beta = 1.0 / ( b_denom + c2_h(i,j,2) )
   d1 = beta * b_denom
-  sfn(2) = ( beta * hN2(2) )*sfn(2)
+  sfn(i,j,2) = ( beta * hN2(i,j,2) )*sfn(i,j,2)
   do K=3,nk
-    c1(k-1) = beta * c2_h(k-1)
-    b_denom = hN2(K) + d1*c2_h(k-1)
-    beta = 1.0 / (b_denom + c2_h(k))
+    c1(i,j,k-1) = beta * c2_h(i,j,k-1)
+    b_denom = hN2(i,j,K) + d1*c2_h(i,j,k-1)
+    beta = 1.0 / (b_denom + c2_h(i,j,k))
     d1 = beta * b_denom
-    sfn(K) = beta * (hN2(K)*sfn(K) + c2_h(k-1)*sfn(K-1))
+    sfn(i,j,K) = beta * (hN2(i,j,K)*sfn(i,j,K) + c2_h(i,j,k-1)*sfn(i,j,K-1))
   enddo
-  c1(nk) = beta * c2_h(nk)
-  sfn(nk+1) = 0.
+  c1(i,j,nk) = beta * c2_h(i,j,nk)
+  sfn(i,j,nk+1) = 0.
   do K=nk,2,-1
-    sfn(K) = sfn(K) + c1(k)*sfn(K+1)
+    sfn(i,j,K) = sfn(i,j,K) + c1(i,j,k)*sfn(i,j,K+1)
   enddo
 
 end subroutine streamfn_solver
